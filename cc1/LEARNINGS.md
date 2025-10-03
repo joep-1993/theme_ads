@@ -1,0 +1,483 @@
+# LEARNINGS
+_Capture mistakes, solutions, and patterns. Update when: errors occur, bugs are fixed, patterns emerge._
+
+## Docker Commands
+```bash
+# Thema Ads Web Interface (Quick Start)
+./start-thema-ads.sh           # Build, start, and initialize everything
+
+# Thema Ads Optimized CLI
+cd thema_ads_optimized/
+./docker-run.sh setup          # Setup environment and directories
+./docker-run.sh build          # Build Docker image
+./docker-run.sh dry-run        # Test run (no changes)
+./docker-run.sh run            # Production run
+./docker-run.sh logs           # View logs
+./docker-run.sh clean          # Cleanup Docker resources
+```
+
+## Common Issues & Solutions
+
+### Google Ads API Version Compatibility
+- **Error**: `501 GRPC target method can't be resolved`
+- **Cause**: Using outdated Google Ads API version (v16)
+- **Solution**: Upgrade to google-ads>=25.1.0 (currently v28.0.0)
+
+### Google Ads OAuth Credentials Mismatch
+- **Error**: `unauthorized_client: Unauthorized`
+- **Cause**: Refresh token must match the exact client_id/client_secret used to generate it
+- **Solution**: Ensure client_id and client_secret match the ones used to create the refresh_token
+
+### Google Ads API Parameter Changes
+- **Error**: `mutate_ad_group_ads() got an unexpected keyword argument 'partial_failure'`
+- **Cause**: Google Ads API v28+ removed 'partial_failure' parameter
+- **Solution**: Remove partial_failure parameter from all mutate operations
+
+### Empty List Conditional Bug
+- **Error**: Operations silently skipped even though data exists
+- **Cause**: Empty lists evaluate to False in Python conditionals (e.g., `if new_ads and label_ops:`)
+- **Solution**: Check only the required condition (e.g., `if new_ads:`), not empty supporting lists
+
+### Results Mapping Bug in Batch Processing
+- **Error**: All items marked as failed with no error message when ad operations list is empty
+- **Cause**: Using index-based success check `success=i < len(new_ad_resources)` fails when no operations were built
+- **Impact**: Ad groups with no existing ads or no final URLs incorrectly marked as failed without error messages
+- **Solution**: Separately track which inputs had operations built vs which failed pre-checks
+```python
+# Track separately
+processed_inputs = []  # Had operations built
+failed_inputs = []     # Failed pre-checks (no existing ad, no final URL)
+skipped_ags = []       # Already processed (has SD_DONE label)
+
+# Build operations
+for inp, ag_resource in zip(inputs, ad_group_resources):
+    if already_has_label:
+        skipped_ags.append(inp)
+    elif result := build_operations(inp):
+        processed_inputs.append(inp)
+        ad_operations.append(result)
+    else:
+        failed_inputs.append(inp)
+
+# Map results correctly
+for i, inp in enumerate(processed_inputs):
+    results.append(ProcessingResult(success=True, new_ad_resource=new_ad_resources[i]))
+
+for inp in failed_inputs:
+    results.append(ProcessingResult(success=False, error="No existing ad found or no final URL available"))
+```
+
+### Module Import Errors in Docker
+- **Error**: `ModuleNotFoundError: No module named 'database'`
+- **Cause**: Relative imports don't work when running as module in Docker container
+- **Solution**: Use absolute imports (e.g., `from backend.database import get_db_connection`)
+
+### Empty CSV Rows Causing Job Failures
+- **Error**: `Error in query: unexpected input 1.` when starting job
+- **Cause**: CSV contained empty rows with blank customer_id or ad_group_id fields
+- **Solution**: Skip rows during CSV parsing where customer_id or ad_group_id is empty
+```python
+if not customer_id or not ad_group_id:
+    continue  # Skip empty rows
+```
+
+### Customer IDs with Dashes Breaking Google Ads API
+- **Error**: `Error in query: unexpected input 1.` when querying ad groups
+- **Cause**: Customer IDs formatted as "123-456-7890" instead of "1234567890"
+- **Solution**: Automatically strip dashes from customer_id during CSV parsing
+```python
+customer_id = row['customer_id'].strip().replace('-', '')
+```
+
+### Excel Scientific Notation - Precision Loss Problem
+- **Error**: `BAD_RESOURCE_ID` or "No existing ad found" even though ads exist
+- **Root Cause**: Excel scientific notation stores **only 5-6 significant digits**, losing precision
+- **Example**:
+  - Original ID: `168066123456` (12 digits)
+  - Excel converts: `1.68066E+11` (only 6 significant digits!)
+  - Converted back: `168066000000` (last 6 digits become zeros)
+- **Impact**: Ad group IDs corrupted, lookups fail, all items marked as "no existing ad"
+- **Initial Solution (INSUFFICIENT)**: Convert scientific notation back
+```python
+def convert_scientific_notation(value: str) -> str:
+    if 'E' in value.upper():
+        value_normalized = value.replace(',', '.')
+        return str(int(float(value_normalized)))  # Still loses precision!
+```
+- **Problem**: Precision already lost in Excel file (168066123456 → 168066000000)
+- **Real Solution**: Use `ad_group_name` instead of `ad_group_id` for lookups
+  1. Include `ad_group_name` column in CSV exports
+  2. Look up correct `ad_group_id` from Google Ads API using name
+  3. Use correct ID for all operations
+```python
+# Backend: Store ad_group_name from CSV
+item['ad_group_name'] = row.get('ad_group_name')
+
+# Processing: Resolve correct IDs from names
+async def _resolve_ad_group_ids(customer_id, inputs):
+    inputs_needing_lookup = [inp for inp in inputs if inp.ad_group_name]
+    query = f"SELECT ad_group.id, ad_group.name FROM ad_group WHERE ad_group.name IN ({names})"
+    name_to_id = {row.ad_group.name: str(row.ad_group.id) for row in response}
+    # Update inputs with correct IDs from Google Ads
+```
+- **Prevention**: Always export with `ad_group_name` column; CSV must include both ID and name
+
+### CSV Encoding Issues
+- **Error**: `'utf-8' codec can't decode byte 0xe8 in position X: invalid continuation byte`
+- **Cause**: CSV file exported from Excel or other tools using non-UTF-8 encoding (Windows-1252, ISO-8859-1)
+- **Solution**: Try multiple encodings in fallback order
+```python
+encodings = ['utf-8', 'utf-8-sig', 'windows-1252', 'iso-8859-1', 'latin1']
+for encoding in encodings:
+    try:
+        decoded = contents.decode(encoding)
+        break
+    except UnicodeDecodeError:
+        continue
+```
+
+### Google Ads API Query Filter Limits - Configurable Batch Size
+- **Error**: `FILTER_HAS_TOO_MANY_VALUES` - "Request contains an invalid argument"
+- **Cause**: WHERE IN clause with too many values (e.g., 50,000+ ad group resources)
+- **Solution**: Batch queries with user-configurable batch size (default: 7500)
+```python
+# Frontend: User selects batch size (1000-10000, default 7500)
+batch_size = batchSizeInput.value || 7500
+
+# Backend: Store batch_size in job
+job_id = create_job(input_data, batch_size=batch_size)
+
+# Processing: Use dynamic batch_size instead of hardcoded constant
+async def prefetch_existing_ads_bulk(client, customer_id, ad_group_resources, batch_size=7500):
+    for i in range(0, len(resources), batch_size):
+        batch = resources[i:i + batch_size]
+        resources_str = ", ".join(f"'{r}'" for r in batch)
+        query = f"SELECT ... WHERE resource IN ({resources_str})"
+        response = service.search(customer_id, query)
+```
+- **Impact**: Customers with 10k+ ad groups were failing completely before this fix
+- **Performance Optimization**:
+  - 1,000 → 5,000: ~5x speedup
+  - 5,000 → 7,500: Additional ~33% speedup (fewer API calls)
+  - Example: 54,968 ad groups = 11 batches @ 5k vs 8 batches @ 7.5k (27% fewer calls)
+- **User Control**:
+  - Smaller batches (1000-3000) for rate-limited scenarios
+  - Default 7500 for optimal performance
+  - Larger batches (up to 10000) for maximum speed
+  - Stored per-job for consistency across pauses/resumes
+
+### Large CSV Upload Timeouts
+- **Error**: Connection timeout during upload, "Failed to load jobs list (request timed out)"
+- **Cause**: Individual row-by-row database inserts extremely slow for large files (100k+ rows)
+- **Solution**: Use batch inserts with executemany() and dynamic timeouts
+```python
+# Batch insert instead of loop
+input_values = [(job_id, item['customer_id'], ...) for item in input_data]
+cur.executemany("INSERT INTO table VALUES (%s, %s, ...)", input_values)
+
+# Dynamic timeout on frontend based on file size
+baseTimeout = 120000  # 2 minutes
+extraTimeout = Math.floor(fileSize / (5 * 1024 * 1024)) * 30000  # +30s per 5MB
+uploadTimeout = Math.min(baseTimeout + extraTimeout, 600000)  # Max 10 min
+```
+- **Performance**: Batch inserts are 100-1000x faster than individual inserts for large datasets
+
+### GitHub Push Protection Blocking Secrets
+- **Error**: `Push cannot contain secrets` - Google OAuth tokens, Azure secrets detected
+- **Cause**: Hardcoded credentials in thema_ads script were committed to git history
+- **Solution**:
+  1. Remove files with secrets: `git rm --cached thema_ads_project/thema_ads`
+  2. Add to .gitignore: `thema_ads_project/thema_ads` and `*.xlsx`
+  3. Refactor script to use environment variables from .env file
+  4. Amend commit to exclude sensitive files
+```bash
+# Remove from git tracking
+git rm --cached path/to/secret-file
+
+# Add to .gitignore
+echo "path/to/secret-file" >> .gitignore
+
+# Amend commit
+git add .gitignore
+git commit --amend --no-edit
+```
+
+## Git Commands
+```bash
+# Repository Setup
+git init                                    # Initialize repository
+git remote add origin git@github.com:user/repo.git
+git branch -M main                          # Rename branch to main
+git push -u origin main                     # Push to GitHub
+
+# Configuration
+git config user.name "username"
+git config user.email "email@example.com"
+```
+
+## Project Patterns
+
+### Async/Parallel Processing for Performance
+- **Pattern**: Use asyncio with semaphore-controlled concurrency
+- **Benefit**: 20-50x speedup vs sequential processing
+- **Example**: Process 10 customers in parallel, each with batched operations
+```python
+semaphore = asyncio.Semaphore(10)
+tasks = [process_customer(cid, data) for cid, data in grouped]
+results = await asyncio.gather(*tasks)
+```
+
+### Batch API Operations
+- **Pattern**: Collect operations in memory, execute in single API call
+- **Benefit**: Reduce API calls from 6 per item to 1 per 1000 items
+- **Example**: Create 1000 ads in one mutate_ad_group_ads() call
+- **Limit**: Google Ads API supports up to 10,000 operations per request
+
+### Idempotent Processing with Label-Based Tracking
+- **Pattern**: Label processed items and skip them on subsequent runs
+- **Benefit**: Prevent duplicate processing, enable safe re-runs, resume after failures
+- **Example**: Label ad groups with "SD_DONE" after processing, skip any with this label
+```python
+# Prefetch ad group labels
+ag_labels_map = await prefetch_ad_group_labels(client, customer_id, ad_groups, "SD_DONE")
+
+# Skip already processed
+for inp, ag_resource in zip(inputs, ad_group_resources):
+    if ag_labels_map.get(ag_resource, False):
+        logger.info(f"Skipping {inp.ad_group_id} - already has SD_DONE label")
+        continue
+    # ... process ad group ...
+    # After processing, label it
+    await label_ad_groups_batch(client, customer_id, [(ag_resource, sd_done_label)])
+```
+
+### Prefetch Strategy for Bulk Operations
+- **Pattern**: Load all required data upfront in 2-3 queries instead of N queries
+- **Benefit**: Eliminate redundant API calls, enable better caching
+- **Example**: Fetch all labels, all existing ads for customer before processing
+
+### State Persistence for Resumable Jobs
+- **Pattern**: Store job state in PostgreSQL with granular item tracking
+- **Benefit**: Resume from exact point after crash or pause, zero data loss
+- **Example**: Track job status + individual item status (pending/processing/completed/failed)
+```sql
+-- Job tracks overall progress
+thema_ads_jobs: id, status, total, processed, successful, failed
+
+-- Items track individual ad groups
+thema_ads_job_items: id, job_id, customer_id, ad_group_id, status, error_message
+```
+
+### Flexible CSV Column Handling
+- **Pattern**: Parse CSV by column names (not positions); make columns optional
+- **Benefit**: Users can provide minimal CSV (2 cols) or full CSV (4+ cols); extra columns ignored; column order doesn't matter
+- **Example**: Accept both minimal and full formats
+```csv
+# Minimal (fetches campaign info at runtime)
+customer_id,ad_group_id
+1234567890,9876543210
+
+# Full (faster, no API calls needed)
+customer_id,campaign_id,campaign_name,ad_group_id
+1234567890,5555,My Campaign,9876543210
+
+# Extra columns ignored (status, budget, etc.)
+customer_id,campaign_id,campaign_name,ad_group_id,status,budget
+```
+
+### Defer Expensive Operations from Upload to Execution
+- **Pattern**: Don't fetch external data during file upload; defer to job execution
+- **Benefit**: Fast uploads (no timeouts), better error handling, users can upload large files quickly
+- **Example**: Campaign info can be provided in CSV or fetched when job starts, not during upload
+```python
+# During upload: just parse and store
+item = {
+    'customer_id': customer_id,
+    'ad_group_id': ad_group_id,
+    'campaign_id': row.get('campaign_id'),  # Optional
+    'campaign_name': row.get('campaign_name')  # Optional
+}
+
+# During job execution: fetch missing data if needed
+if not item['campaign_id']:
+    campaign_info = fetch_from_google_ads_api(customer_id, ad_group_id)
+```
+
+### Automatic Background Task Execution
+- **Pattern**: Use FastAPI BackgroundTasks to auto-start long-running jobs after upload
+- **Benefit**: Better UX (no manual start button), faster workflow, cleaner API
+- **Example**: Auto-start job processing after CSV upload completes
+```python
+from fastapi import BackgroundTasks
+
+@app.post("/api/thema-ads/upload")
+async def upload_csv(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
+    # Parse CSV and create job
+    job_id = thema_ads_service.create_job(input_data)
+
+    # Automatically start processing in background
+    if background_tasks:
+        background_tasks.add_task(thema_ads_service.process_job, job_id)
+        logger.info(f"Job {job_id} queued for automatic processing")
+
+    return {"job_id": job_id, "total_items": len(input_data), "status": "processing"}
+```
+
+### Skipped vs Failed Status Differentiation
+- **Pattern**: Distinguish between actual failures and items that can't be processed
+- **Benefit**: Clearer reporting, better troubleshooting, prevents false alarms
+- **Example**: Mark items without existing ads as "skipped" instead of "failed"
+```python
+# Backend status logic
+if result.success and "Already processed" in result.error:
+    status = 'skipped'  # Has SD_DONE label, already processed
+elif not result.success and "No existing ad" in result.error:
+    status = 'skipped'  # No existing ads to work with (not a failure)
+elif result.success:
+    status = 'completed'
+else:
+    status = 'failed'  # Actual error (API failure, etc.)
+
+# Frontend displays three categories
+# Success: New ads created
+# Skipped: Already processed OR no existing ads
+# Failed: Actual errors that need attention
+```
+
+### Batched Discovery vs Per-Item Queries
+- **Problem**: Checking properties for thousands of items with individual queries
+- **Anti-pattern**: 1 API call per item to check a property (e.g., checking if 146k ad groups have a label = 146k API calls)
+- **Solution**: Batch fetch all items, batch fetch all properties, filter in memory
+```python
+# ❌ BAD: 1 API call per ad group (146k calls!)
+for ad_group in ad_groups:
+    query = f"SELECT ... WHERE ad_group = '{ad_group.resource}' AND label = 'SD_DONE'"
+    has_label = len(list(service.search(query))) > 0
+
+# ✅ GOOD: Batch queries (2-3 calls total)
+# 1. Get all ad groups (1 call)
+ad_groups = list(service.search("SELECT ad_group FROM ad_group WHERE ..."))
+
+# 2. Get all ad groups WITH the label (1-2 batched calls for 146k items)
+BATCH_SIZE = 5000
+for i in range(0, len(ad_groups), BATCH_SIZE):
+    batch = ad_groups[i:i + BATCH_SIZE]
+    resources_str = ", ".join(f"'{ag}'" for ag in batch)
+    query = f"SELECT ad_group_label.ad_group WHERE ad_group IN ({resources_str}) AND label = 'SD_DONE'"
+    # Process batch...
+
+# 3. Filter in memory
+processable_ad_groups = [ag for ag in ad_groups if ag not in labeled_set]
+```
+- **Performance**: Reduces 146k API calls to ~30 calls (5000x improvement)
+
+### User-Configurable Performance Parameters
+- **Pattern**: Allow users to adjust performance-critical parameters via UI
+- **Benefit**: Optimize for different scenarios (rate limits, speed, API quotas) without code changes
+- **Example**: Configurable batch size for API queries
+```python
+# Frontend: Input field with validation
+<input type="number" id="batchSize" value="7500" min="1000" max="10000">
+
+# JavaScript: Send to backend
+const batchSize = parseInt(document.getElementById('batchSize').value) || 7500;
+formData.append('batch_size', batchSize);
+
+# Backend: Store with job
+job_id = create_job(input_data, batch_size=batch_size)
+cur.execute("INSERT INTO jobs (batch_size) VALUES (%s)", (batch_size,))
+
+# Processing: Retrieve and use
+job_details = get_job_status(job_id)
+batch_size = job_details.get('batch_size', 7500)
+processor = ThemaAdsProcessor(config, batch_size=batch_size)
+```
+- **Use Cases**:
+  - API rate limiting: Lower batch size (1000-3000) to stay under quota
+  - Maximum speed: Higher batch size (7500-10000) for fast processing
+  - Testing: Small batch size (100) for quick validation
+
+### Theme Label Filtering Issue - False Negatives
+- **Problem**: Ad groups with RSAs incorrectly marked as "skipped - no ads" even when ads exist
+- **Root Cause**: Prefetch query filtered out ads that already had theme labels (BF_2025, SINGLES_DAY)
+- **Impact**: If ALL RSAs in an ad group had theme labels from previous runs, query returns 0 results
+- **Solution**: Remove label filtering from ad prefetch, rely solely on SD_DONE ad group label
+```python
+# ❌ BAD: Filters out ads with theme labels (causes false negatives)
+query = f"""
+    SELECT ad_group_ad.* FROM ad_group_ad
+    WHERE ad_group IN ({resources})
+    AND ad.type = RESPONSIVE_SEARCH_AD
+    AND status != REMOVED
+    AND labels CONTAINS NONE ('{theme_label}')  # ← Causes problem
+"""
+
+# ✅ GOOD: No label filtering on ads (SD_DONE on ad group prevents reprocessing)
+query = f"""
+    SELECT ad_group_ad.* FROM ad_group_ad
+    WHERE ad_group IN ({resources})
+    AND ad.type = RESPONSIVE_SEARCH_AD
+    AND status != REMOVED
+"""
+# Ad group-level SD_DONE label check prevents duplicate processing
+```
+
+### Google Ads API 10,000 Operations Per Request Limit
+- **Problem**: Jobs with 20,000+ ad groups fail with "TOO_MANY_MUTATE_OPERATIONS" or "REQUEST_TOO_LARGE"
+- **Root Cause**: Batch operations sent all items in single API request, exceeding 10K operation limit
+- **Solution**: Chunk all batch operations into groups of 10,000 or less
+```python
+# ❌ BAD: Send all operations in one request
+operations = [build_operation(item) for item in items]  # 20,000 operations
+response = service.mutate(customer_id, operations)  # FAILS
+
+# ✅ GOOD: Chunk operations into batches of 10K
+BATCH_LIMIT = 10000
+all_results = []
+
+for chunk_start in range(0, len(items), BATCH_LIMIT):
+    chunk = items[chunk_start:chunk_start + BATCH_LIMIT]
+    operations = [build_operation(item) for item in chunk]
+    response = service.mutate(customer_id, operations)
+    all_results.extend(response.results)
+```
+
+### Discovery Optimization: Direct Ad Query vs Nested Queries
+- **Problem**: Discovery was slow for large accounts (146k ad groups took ~271 API queries)
+- **Old Approach**: Nested queries (customers → campaigns → ad groups → label checks)
+- **New Approach**: Direct ad query with cross-resource filtering + deduplication
+- **Performance Improvement**: 74% fewer queries (271 → 71 for 146k ad groups)
+- **How It Works**:
+```python
+# ❌ OLD: Nested queries (slow)
+for customer in customers:
+    campaigns = query("SELECT campaign FROM campaign WHERE name LIKE 'HS/%'")  # 1 per customer
+    for campaign in campaigns:
+        ad_groups = query("SELECT ad_group FROM ad_group WHERE campaign = X")  # 1 per campaign
+    # + batch label checks
+
+# ✅ NEW: Direct ad query with cross-resource filter (fast)
+ad_group_map = {}
+for customer in customers:
+    # Single query gets all data using campaign.name filter
+    ads = query("""
+        SELECT ad_group_ad.ad_group, ad_group.id, campaign.id, campaign.name
+        FROM ad_group_ad
+        WHERE campaign.name LIKE 'HS/%'
+        AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+        AND ad_group_ad.status != REMOVED
+    """)  # 1 per customer
+
+    # Deduplicate in memory (ad group may have multiple ads)
+    for row in ads:
+        if row.ad_group not in ad_group_map:
+            ad_group_map[row.ad_group] = {...}
+# + batch label checks
+```
+- **Key Techniques**:
+  - **Cross-resource filtering**: Use `campaign.name` in `ad_group_ad` query (Google Ads API supports this)
+  - **In-memory deduplication**: Use dict/set to deduplicate ad groups (multiple ads per ad group)
+  - **Customer-grouped label checks**: Still batch-check SD_DONE labels per customer for efficiency
+
+---
+_Last updated: 2025-10-03_
