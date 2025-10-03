@@ -10,9 +10,10 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - **Processing**: Batch operations with pause/resume
 
 ### Key Components
-- `backend/main.py` - FastAPI API endpoints
+- `backend/main.py` - FastAPI API endpoints (includes auto-discovery from customer whitelist)
 - `backend/thema_ads_service.py` - Business logic and job processing
 - `backend/database.py` - Database connection management
+- `thema_ads_optimized/account ids` - Whitelist of 28 active customer IDs (discovery loads from this file)
 - `thema_ads_optimized/` - CLI automation tools
 - `thema_ads_optimized/operations/` - Google Ads API operations
 - `thema_ads_optimized/processors/` - Data processing logic
@@ -36,6 +37,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
 2. **Async Processing** - Parallel customer processing with semaphore control
 3. **Prefetch Strategy** - Load all data upfront to eliminate redundant API calls
 4. **Direct Ad Query** - 74% fewer queries using cross-resource filtering
+5. **Customer Account Whitelisting** - Use static file-based customer ID list instead of dynamic MCC query to avoid CANCELED accounts (eliminates permission errors, faster discovery)
 
 ### Reliability
 1. **Idempotent Processing** - SD_DONE labels prevent duplicate processing
@@ -70,6 +72,7 @@ theme_ads/
 │   ├── database.py                 # DB connection
 │   └── thema_ads_schema.sql        # DB schema
 ├── thema_ads_optimized/
+│   ├── account ids                 # Whitelist of active customer IDs (28 accounts, excludes 16 CANCELED)
 │   ├── main_optimized.py           # CLI entry point
 │   ├── operations/                 # Google Ads operations
 │   │   ├── ads.py                  # Ad creation

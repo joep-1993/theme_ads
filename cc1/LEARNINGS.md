@@ -18,6 +18,23 @@ cd thema_ads_optimized/
 
 ## Common Issues & Solutions
 
+### Google Ads CANCELED Accounts Cause PERMISSION_DENIED Errors
+- **Error**: `StatusCode.PERMISSION_DENIED: The caller does not have permission` with `CUSTOMER_NOT_ENABLED: The customer account can't be accessed because it is not yet enabled or has been deactivated`
+- **Cause**: MCC queries return all customer accounts including CANCELED/deactivated accounts
+- **Impact**: Discovery fails for 16 CANCELED accounts (e.g., "Beslist.nl - Boeken", "Beslist.nl - CD's", "Beslist.nl - DVD's", etc.)
+- **Solution**: Maintain whitelist of active customer IDs in separate file, load from file instead of querying MCC
+```python
+# Load customer IDs from file
+account_ids_file = Path(__file__).parent.parent / "thema_ads_optimized" / "account ids"
+with open(account_ids_file, 'r') as f:
+    customer_ids = [line.strip() for line in f if line.strip()]
+
+# Use only whitelisted accounts
+beslist_customers = [{'id': cid} for cid in customer_ids]
+```
+- **File Format**: One customer ID per line (e.g., `4056770576`)
+- **Maintenance**: Update file when accounts are added/removed from MCC
+
 ### Google Ads API Version Compatibility
 - **Error**: `501 GRPC target method can't be resolved`
 - **Cause**: Using outdated Google Ads API version (v16)
@@ -441,6 +458,30 @@ for chunk_start in range(0, len(items), BATCH_LIMIT):
     response = service.mutate(customer_id, operations)
     all_results.extend(response.results)
 ```
+
+### Customer Account Whitelisting for MCC Discovery
+- **Pattern**: Store active customer IDs in external file instead of querying MCC for all accounts
+- **Benefit**: Avoid CANCELED/disabled accounts, faster discovery, explicit control over which accounts to process
+- **Use Case**: MCC accounts with mixed active/inactive customers (e.g., 28 active + 16 CANCELED)
+- **Implementation**:
+```python
+# File: thema_ads_optimized/account ids (one ID per line)
+4056770576
+1496704472
+4964513580
+...
+
+# Backend: Load from file
+account_ids_file = Path(__file__).parent.parent / "thema_ads_optimized" / "account ids"
+with open(account_ids_file, 'r') as f:
+    customer_ids = [line.strip() for line in f if line.strip()]
+
+# Process only whitelisted customers
+for customer_id in customer_ids:
+    process_customer(customer_id)
+```
+- **Alternative Approach**: Query MCC with status filter (requires additional API call and filtering logic)
+- **Maintenance**: Update file when account status changes (new accounts added, old accounts deactivated)
 
 ### Discovery Optimization: Direct Ad Query vs Nested Queries
 - **Problem**: Discovery was slow for large accounts (146k ad groups took ~271 API queries)

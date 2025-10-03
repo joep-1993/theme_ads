@@ -10,6 +10,7 @@ _Tasks currently being worked on_
 ## Completed
 _Finished tasks (move here when done)_
 
+- [x] Filter discovery to use only valid customer accounts from whitelist file (eliminates 16 CANCELED accounts causing PERMISSION_DENIED errors) #claude-session:2025-10-04
 - [x] Separate theme_ads from content_top into independent repository #claude-session:2025-10-03
 - [x] Create dedicated backend/main.py with Google Ads API endpoints only #claude-session:2025-10-03
 - [x] Optimize auto-discovery with direct ad query (74% fewer API queries: 271→71 for 146k ad groups) #claude-session:2025-10-03

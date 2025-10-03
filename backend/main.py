@@ -1,13 +1,19 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 import csv
 import io
 from datetime import datetime
+from pathlib import Path
 from backend.database import get_db_connection
 from backend.thema_ads_service import thema_ads_service
 
 app = FastAPI(title="Theme Ads - Google Ads Automation", version="1.0.0")
+
+# Mount static files
+frontend_dir = Path(__file__).parent.parent / "frontend"
+app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
 
 # CORS for frontend
 app.add_middleware(
@@ -19,6 +25,10 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
+    """Serve the frontend HTML."""
+    html_file = Path(__file__).parent.parent / "frontend" / "thema-ads.html"
+    if html_file.exists():
+        return FileResponse(html_file)
     return {
         "status": "running",
         "project": "theme_ads",
@@ -91,36 +101,23 @@ async def discover_ad_groups(
         config = load_config_from_env()
         client = initialize_client(config.google_ads)
 
-        mcc_customer_id = "3011145605"
-        logger.info(f"Discovering ad groups from MCC {mcc_customer_id}")
+        # Load customer IDs from file
+        account_ids_file = Path(__file__).parent.parent / "thema_ads_optimized" / "account ids"
+        if not account_ids_file.exists():
+            raise HTTPException(status_code=500, detail="Account IDs file not found")
+
+        with open(account_ids_file, 'r') as f:
+            customer_ids = [line.strip() for line in f if line.strip()]
+
+        logger.info(f"Loaded {len(customer_ids)} customer IDs from account ids file")
 
         # Get all customer accounts
         ga_service = client.get_service("GoogleAdsService")
-        customer_service = client.get_service("CustomerService")
 
-        # Query accessible customers
-        customer_query = """
-            SELECT
-                customer_client.descriptive_name,
-                customer_client.id,
-                customer_client.resource_name
-            FROM customer_client
-            WHERE customer_client.manager = FALSE
-        """
+        # Build customer list with IDs from file
+        beslist_customers = [{'id': cid} for cid in customer_ids]
 
-        response = ga_service.search(customer_id=mcc_customer_id, query=customer_query)
-
-        beslist_customers = []
-        for row in response:
-            name = row.customer_client.descriptive_name
-            if name and name.startswith("Beslist.nl -"):
-                beslist_customers.append({
-                    'name': name,
-                    'id': str(row.customer_client.id),
-                    'resource_name': row.customer_client.resource_name
-                })
-
-        logger.info(f"Found {len(beslist_customers)} Beslist.nl accounts")
+        logger.info(f"Using {len(beslist_customers)} customer accounts from file")
 
         # Query ads directly with campaign filter for faster discovery
         input_data = []
@@ -128,7 +125,7 @@ async def discover_ad_groups(
 
         for customer in beslist_customers:
             customer_id = customer['id']
-            logger.info(f"Processing customer {customer_id}: {customer['name']}")
+            logger.info(f"Processing customer {customer_id}")
 
             try:
                 # Direct ad query with campaign.name filter (much faster than nested queries)
@@ -541,7 +538,7 @@ async def download_failed_items(job_id: int):
         writer = csv.writer(output)
 
         # Write header
-        writer.writerow(['customer_id', 'campaign_id', 'campaign_name', 'ad_group_id', 'ad_group_name', 'status', 'reason'])
+        writer.writerow(['customer_id', 'campaign_id', 'campaign_name', 'ad_group_id', 'ad_group_name', 'status', 'reason', 'error_message'])
 
         # Write data
         for item in items:
@@ -563,7 +560,8 @@ async def download_failed_items(job_id: int):
                 item['ad_group_id'],
                 item['ad_group_name'] or '',
                 item['status'],
-                reason
+                reason,
+                item['error_message'] or ''
             ])
 
         # Prepare response
@@ -573,6 +571,62 @@ async def download_failed_items(job_id: int):
             media_type="text/csv",
             headers={
                 "Content-Disposition": f"attachment; filename=job_{job_id}_failed_and_skipped_items.csv"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/thema-ads/jobs/{job_id}/successful-items-csv")
+async def download_successful_items(job_id: int):
+    """Download CSV of successfully processed items for a job."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Get successful items
+        cur.execute("""
+            SELECT customer_id, campaign_id, campaign_name, ad_group_id, ad_group_name, new_ad_resource
+            FROM thema_ads_job_items
+            WHERE job_id = %s AND status = 'successful'
+            ORDER BY customer_id, ad_group_id
+        """, (job_id,))
+
+        items = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not items:
+            raise HTTPException(status_code=404, detail="No successful items found for this job")
+
+        # Create CSV in memory
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Write header
+        writer.writerow(['customer_id', 'campaign_id', 'campaign_name', 'ad_group_id', 'ad_group_name', 'new_ad_resource'])
+
+        # Write data
+        for item in items:
+            writer.writerow([
+                item['customer_id'],
+                item['campaign_id'] or '',
+                item['campaign_name'] or '',
+                item['ad_group_id'],
+                item['ad_group_name'] or '',
+                item['new_ad_resource'] or ''
+            ])
+
+        # Prepare response
+        output.seek(0)
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename=job_{job_id}_successful_items.csv"
             }
         )
 

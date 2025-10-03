@@ -140,8 +140,22 @@ class ThemaAdsService:
 
             recent_failures = cur.fetchall()
 
+            # Map database columns to API field names
+            job_dict = dict(job)
             return {
-                **dict(job),
+                'id': job_dict['id'],
+                'status': job_dict['status'],
+                'total_items': job_dict.get('total_ad_groups', 0),
+                'successful_items': items_by_status.get('successful', 0),
+                'failed_items': items_by_status.get('failed', 0),
+                'skipped_items': items_by_status.get('skipped', 0),
+                'pending_items': items_by_status.get('pending', 0),
+                'started_at': job_dict.get('started_at'),
+                'completed_at': job_dict.get('completed_at'),
+                'created_at': job_dict.get('created_at'),
+                'updated_at': job_dict.get('updated_at'),
+                'error_message': job_dict.get('error_message'),
+                'batch_size': job_dict.get('batch_size', 7500),
                 'items_by_status': items_by_status,
                 'recent_failures': recent_failures
             }
@@ -223,23 +237,19 @@ class ThemaAdsService:
                 UPDATE thema_ads_jobs
                 SET processed_ad_groups = (
                         SELECT COUNT(*) FROM thema_ads_job_items
-                        WHERE job_id = %s AND status IN ('completed', 'failed', 'skipped')
+                        WHERE job_id = %s AND status IN ('successful', 'failed', 'skipped')
                     ),
                     successful_ad_groups = (
                         SELECT COUNT(*) FROM thema_ads_job_items
-                        WHERE job_id = %s AND status = 'completed'
+                        WHERE job_id = %s AND status = 'successful'
                     ),
                     failed_ad_groups = (
                         SELECT COUNT(*) FROM thema_ads_job_items
                         WHERE job_id = %s AND status = 'failed'
                     ),
-                    skipped_ad_groups = (
-                        SELECT COUNT(*) FROM thema_ads_job_items
-                        WHERE job_id = %s AND status = 'skipped'
-                    ),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
-            """, (job_id, job_id, job_id, job_id, job_id))
+            """, (job_id, job_id, job_id, job_id))
 
             conn.commit()
 
@@ -254,7 +264,7 @@ class ThemaAdsService:
             from dotenv import load_dotenv
 
             # Load .env file from thema_ads_optimized directory
-            env_path = Path(__file__).parent.parent / "thema_ads_project" / "thema_ads_optimized" / ".env"
+            env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
             if env_path.exists():
                 logger.info(f"Loading environment from: {env_path}")
                 load_dotenv(env_path)
@@ -325,7 +335,7 @@ class ThemaAdsService:
 
             # Update final status
             job_status = self.get_job_status(job_id)
-            if job_status['failed_ad_groups'] == 0:
+            if job_status['failed_items'] == 0:
                 self.update_job_status(job_id, 'completed')
             else:
                 self.update_job_status(job_id, 'completed')
@@ -367,7 +377,7 @@ class ThemaAdsService:
                         # Ad group has no existing ads to work with (not a failure, just can't process)
                         status = 'skipped'
                     elif result.success:
-                        status = 'completed'
+                        status = 'successful'
                     else:
                         status = 'failed'
 
@@ -417,12 +427,35 @@ class ThemaAdsService:
 
         try:
             cur.execute("""
-                SELECT * FROM thema_ads_jobs
-                ORDER BY created_at DESC
+                SELECT
+                    j.*,
+                    COALESCE(SUM(CASE WHEN i.status = 'successful' THEN 1 ELSE 0 END), 0) as successful_count,
+                    COALESCE(SUM(CASE WHEN i.status = 'failed' THEN 1 ELSE 0 END), 0) as failed_count,
+                    COALESCE(SUM(CASE WHEN i.status = 'skipped' THEN 1 ELSE 0 END), 0) as skipped_count,
+                    COALESCE(SUM(CASE WHEN i.status = 'pending' THEN 1 ELSE 0 END), 0) as pending_count
+                FROM thema_ads_jobs j
+                LEFT JOIN thema_ads_job_items i ON j.id = i.job_id
+                GROUP BY j.id
+                ORDER BY j.created_at DESC
                 LIMIT %s
             """, (limit,))
 
-            return cur.fetchall()
+            jobs = cur.fetchall()
+
+            # Map database columns to API field names
+            return [{
+                'id': job['id'],
+                'status': job['status'],
+                'total_items': job.get('total_ad_groups', 0),
+                'successful_items': job.get('successful_count', 0),
+                'failed_items': job.get('failed_count', 0),
+                'skipped_items': job.get('skipped_count', 0),
+                'pending_items': job.get('pending_count', 0),
+                'started_at': job.get('started_at'),
+                'completed_at': job.get('completed_at'),
+                'created_at': job.get('created_at'),
+                'batch_size': job.get('batch_size', 7500)
+            } for job in jobs]
 
         finally:
             cur.close()

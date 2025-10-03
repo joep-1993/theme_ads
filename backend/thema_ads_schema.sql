@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS thema_ads_job_items (
     job_id INTEGER REFERENCES thema_ads_jobs(id) ON DELETE CASCADE,
     customer_id VARCHAR(50) NOT NULL,
     ad_group_id VARCHAR(50) NOT NULL,
-    status VARCHAR(20) NOT NULL DEFAULT 'pending', -- pending, processing, completed, failed
+    status VARCHAR(20) NOT NULL DEFAULT 'pending', -- pending, successful, failed, skipped
     new_ad_resource VARCHAR(500),
     error_message TEXT,
     processed_at TIMESTAMP,
