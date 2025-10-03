@@ -10,6 +10,8 @@ _Tasks currently being worked on_
 ## Completed
 _Finished tasks (move here when done)_
 
+- [x] Fix REQUEST_TOO_LARGE error with automatic chunk size reduction (recursively halves chunk size from 10K down to 100 until success) #claude-session:2025-10-04
+- [x] Fix error handling for complete chunk failures (track failures per ad group with specific error messages instead of generic "no resource returned") #claude-session:2025-10-04
 - [x] Filter discovery to use only valid customer accounts from whitelist file (eliminates 16 CANCELED accounts causing PERMISSION_DENIED errors) #claude-session:2025-10-04
 - [x] Separate theme_ads from content_top into independent repository #claude-session:2025-10-03
 - [x] Create dedicated backend/main.py with Google Ads API endpoints only #claude-session:2025-10-03

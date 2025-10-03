@@ -459,6 +459,85 @@ for chunk_start in range(0, len(items), BATCH_LIMIT):
     all_results.extend(response.results)
 ```
 
+### Google Ads API REQUEST_TOO_LARGE Error - Automatic Chunk Size Reduction
+- **Problem**: Even with 10K limit enforced, some batches fail with REQUEST_TOO_LARGE (batch size in bytes, not operation count)
+- **Root Cause**: Operations with large RSAs (15 headlines, 4 descriptions) can exceed Google's size limit before hitting 10K count
+- **Impact**: Entire customer batches fail with "no resource returned", marking thousands of ad groups as failed
+- **Solution**: Implement recursive chunk size reduction with automatic retry
+```python
+def _create_chunk_with_retry(service, chunk, chunk_size):
+    """Create a chunk with automatic size reduction on REQUEST_TOO_LARGE."""
+    operations = [build_operation(ad) for ad in chunk]
+
+    try:
+        response = service.mutate_ad_group_ads(customer_id=customer_id, operations=operations)
+        return {"resources": [res.resource_name for res in response.results], "failures": []}
+
+    except GoogleAdsException as e:
+        error_msg = str(e)
+        is_too_large = "REQUEST_TOO_LARGE" in error_msg or "too large" in error_msg.lower()
+
+        if is_too_large and chunk_size > 100:
+            # Retry with half the size
+            new_chunk_size = chunk_size // 2
+            logger.warning(f"REQUEST_TOO_LARGE, retrying with chunk size {new_chunk_size} (was {chunk_size})")
+
+            # Split and retry recursively
+            all_resources = []
+            all_failures = []
+            for sub_start in range(0, len(chunk), new_chunk_size):
+                sub_chunk = chunk[sub_start:sub_start + new_chunk_size]
+                result = _create_chunk_with_retry(service, sub_chunk, new_chunk_size)
+                all_resources.extend(result["resources"])
+                all_failures.extend(result["failures"])
+
+            return {"resources": all_resources, "failures": all_failures}
+        else:
+            # Non-recoverable or chunk too small - mark all as failed with specific error
+            failures = [{"ad_group_resource": ad["ad_group_resource"], "error": str(e)} for ad in chunk]
+            return {"resources": [], "failures": failures}
+```
+- **Behavior**: Automatically halves chunk size (10000 → 5000 → 2500 → 1250 → ...) until success or minimum (100)
+- **Result**: Recovers from size errors automatically, continues processing successful items
+
+### Chunk Failure Error Handling - Per-Item Error Tracking
+- **Problem**: When entire chunk fails, all items marked as "Ad creation failed (no resource returned)" with no details
+- **Root Cause**: create_rsa_batch returned List[str] with only successful resources, no failure info
+- **Impact**: Users couldn't diagnose why specific ad groups failed (policy violations, invalid data, etc.)
+- **Solution**: Return dict with both successes and failures, track errors per ad group
+```python
+# ❌ OLD: Only return successful resources
+async def create_rsa_batch(...) -> List[str]:
+    # ... create ads ...
+    return [res.resource_name for res in response.results]  # No failure info!
+
+# ✅ NEW: Return both successes and failures
+async def create_rsa_batch(...) -> dict:
+    # ... create ads with retry logic ...
+    return {
+        "resources": [res.resource_name for res in response.results],
+        "failures": [{"ad_group_resource": ag_res, "error": error_msg}, ...]
+    }
+
+# Caller: Map failures to specific ad groups
+creation_result = await create_rsa_batch(client, customer_id, ad_operations)
+new_ad_resources = creation_result["resources"]
+creation_failures = creation_result["failures"]
+
+# Build failure map
+failure_map = {f["ad_group_resource"]: f["error"] for f in creation_failures}
+
+# Build results with specific errors
+for i, inp in enumerate(processed_inputs):
+    ad_group_res = ad_operations[i]["ad_group_resource"]
+    if ad_group_res in failure_map:
+        results.append(ProcessingResult(
+            success=False,
+            error=f"Ad creation failed: {failure_map[ad_group_res]}"  # Specific error!
+        ))
+```
+- **Benefit**: Users see exact Google Ads API error (policy violation, invalid URL, etc.) instead of generic message
+
 ### Customer Account Whitelisting for MCC Discovery
 - **Pattern**: Store active customer IDs in external file instead of querying MCC for all accounts
 - **Benefit**: Avoid CANCELED/disabled accounts, faster discovery, explicit control over which accounts to process

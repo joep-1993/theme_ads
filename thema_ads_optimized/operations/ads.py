@@ -15,19 +15,103 @@ async def create_rsa_batch(
     client: GoogleAdsClient,
     customer_id: str,
     ad_data_list: List[dict]  # List of ad configurations
-) -> List[str]:
-    """Create multiple RSAs in batch. Returns list of resource names.
+) -> dict:
+    """Create multiple RSAs in batch. Returns dict with resource names and failures.
 
     Google Ads API limits to 10,000 operations per request.
     This function automatically chunks larger batches.
+
+    Returns:
+        {
+            "resources": List[str],  # Successfully created ad resources
+            "failures": List[dict]   # Failed items with error info
+        }
     """
+
+    def _create_chunk_with_retry(service, chunk, chunk_size):
+        """Create a chunk with automatic size reduction on REQUEST_TOO_LARGE."""
+        operations = []
+
+        for ad_data in chunk:
+            op = client.get_type("AdGroupAdOperation")
+            aga = op.create
+
+            aga.ad_group = ad_data["ad_group_resource"]
+            aga.status = client.enums.AdGroupAdStatusEnum.PAUSED
+
+            ad = aga.ad
+            ad.final_urls.append(ad_data["final_url"])
+
+            rsa = ad.responsive_search_ad
+
+            # Add headlines
+            for headline in ad_data.get("headlines", [])[:15]:
+                if headline:
+                    asset = client.get_type("AdTextAsset")
+                    asset.text = headline
+                    rsa.headlines.append(asset)
+
+            # Add descriptions
+            for description in ad_data.get("descriptions", [])[:4]:
+                if description:
+                    asset = client.get_type("AdTextAsset")
+                    asset.text = description
+                    rsa.descriptions.append(asset)
+
+            # Add paths
+            if ad_data.get("path1"):
+                rsa.path1 = ad_data["path1"]
+            if ad_data.get("path2"):
+                rsa.path2 = ad_data["path2"]
+
+            operations.append(op)
+
+        try:
+            response = service.mutate_ad_group_ads(
+                customer_id=customer_id,
+                operations=operations
+            )
+            resource_names = [res.resource_name for res in response.results]
+            return {"resources": resource_names, "failures": []}
+
+        except GoogleAdsException as e:
+            # Check if it's REQUEST_TOO_LARGE error
+            error_msg = str(e)
+            is_too_large = "REQUEST_TOO_LARGE" in error_msg or "too large" in error_msg.lower()
+
+            if is_too_large and chunk_size > 100:
+                # Retry with smaller chunks (half the size)
+                new_chunk_size = chunk_size // 2
+                logger.warning(f"REQUEST_TOO_LARGE error, retrying with chunk size {new_chunk_size} (was {chunk_size})")
+
+                all_resources = []
+                all_failures = []
+
+                # Split into smaller sub-chunks
+                for sub_start in range(0, len(chunk), new_chunk_size):
+                    sub_chunk = chunk[sub_start:sub_start + new_chunk_size]
+                    result = _create_chunk_with_retry(service, sub_chunk, new_chunk_size)
+                    all_resources.extend(result["resources"])
+                    all_failures.extend(result["failures"])
+
+                return {"resources": all_resources, "failures": all_failures}
+            else:
+                # Non-recoverable error or chunk too small - mark all as failed
+                failures = []
+                for ad_data in chunk:
+                    failures.append({
+                        "ad_group_resource": ad_data["ad_group_resource"],
+                        "error": str(e)
+                    })
+                return {"resources": [], "failures": failures}
 
     def _create():
         if not ad_data_list:
-            return []
+            return {"resources": [], "failures": []}
 
         service = client.get_service("AdGroupAdService")
         all_resource_names = []
+        all_failures = []
 
         # Google Ads API limit: 10,000 operations per request
         BATCH_LIMIT = 10000
@@ -35,58 +119,21 @@ async def create_rsa_batch(
         # Process in chunks
         for chunk_start in range(0, len(ad_data_list), BATCH_LIMIT):
             chunk = ad_data_list[chunk_start:chunk_start + BATCH_LIMIT]
-            operations = []
+            chunk_num = chunk_start//BATCH_LIMIT + 1
+            total_chunks = (len(ad_data_list)-1)//BATCH_LIMIT + 1
 
-            for ad_data in chunk:
-                op = client.get_type("AdGroupAdOperation")
-                aga = op.create
+            result = _create_chunk_with_retry(service, chunk, BATCH_LIMIT)
 
-                aga.ad_group = ad_data["ad_group_resource"]
-                aga.status = client.enums.AdGroupAdStatusEnum.PAUSED
+            all_resource_names.extend(result["resources"])
+            all_failures.extend(result["failures"])
 
-                ad = aga.ad
-                ad.final_urls.append(ad_data["final_url"])
+            if result["resources"]:
+                logger.info(f"Created {len(result['resources'])} RSAs in chunk {chunk_num}/{total_chunks}")
+            if result["failures"]:
+                logger.warning(f"Failed to create {len(result['failures'])} RSAs in chunk {chunk_num}/{total_chunks}")
 
-                rsa = ad.responsive_search_ad
-
-                # Add headlines
-                for headline in ad_data.get("headlines", [])[:15]:
-                    if headline:
-                        asset = client.get_type("AdTextAsset")
-                        asset.text = headline
-                        rsa.headlines.append(asset)
-
-                # Add descriptions
-                for description in ad_data.get("descriptions", [])[:4]:
-                    if description:
-                        asset = client.get_type("AdTextAsset")
-                        asset.text = description
-                        rsa.descriptions.append(asset)
-
-                # Add paths
-                if ad_data.get("path1"):
-                    rsa.path1 = ad_data["path1"]
-                if ad_data.get("path2"):
-                    rsa.path2 = ad_data["path2"]
-
-                operations.append(op)
-
-            try:
-                response = service.mutate_ad_group_ads(
-                    customer_id=customer_id,
-                    operations=operations
-                )
-
-                resource_names = [res.resource_name for res in response.results]
-                all_resource_names.extend(resource_names)
-                logger.info(f"Created {len(resource_names)} RSAs in chunk (batch {chunk_start//BATCH_LIMIT + 1}/{(len(ad_data_list)-1)//BATCH_LIMIT + 1})")
-
-            except GoogleAdsException as e:
-                logger.error(f"Failed to create RSAs in chunk {chunk_start//BATCH_LIMIT + 1}: {e}")
-                # Continue with next chunk instead of failing completely
-
-        logger.info(f"Created {len(all_resource_names)} RSAs total across {(len(ad_data_list)-1)//BATCH_LIMIT + 1} chunks")
-        return all_resource_names
+        logger.info(f"Created {len(all_resource_names)} RSAs total, {len(all_failures)} failures across {total_chunks} chunks")
+        return {"resources": all_resource_names, "failures": all_failures}
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _create)

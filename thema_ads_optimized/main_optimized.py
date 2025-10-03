@@ -259,11 +259,19 @@ class ThemaAdsProcessor:
                 ]
 
             # Create new ads
-            new_ad_resources = await create_rsa_batch(
+            creation_result = await create_rsa_batch(
                 self.client,
                 customer_id,
                 ad_operations
             )
+
+            new_ad_resources = creation_result["resources"]
+            creation_failures = creation_result["failures"]
+
+            # Build ad_group_resource -> error map for failed creations
+            failure_map = {}
+            for failure in creation_failures:
+                failure_map[failure["ad_group_resource"]] = failure["error"]
 
             # Label old ads
             if old_ads_to_label:
@@ -284,8 +292,8 @@ class ThemaAdsProcessor:
 
                 await label_ads_batch(self.client, customer_id, new_label_ops)
 
-            # Label ad groups
-            if label_operations_ad_groups:
+            # Label ad groups (only successful ones)
+            if label_operations_ad_groups and new_ad_resources:
                 await label_ad_groups_batch(
                     self.client,
                     customer_id,
@@ -295,9 +303,23 @@ class ThemaAdsProcessor:
             # Build results
             results = []
 
-            # Add results for successfully processed ad groups
+            # Add results for processed ad groups (match with ad_operations)
             for i, inp in enumerate(processed_inputs):
-                if i < len(new_ad_resources):
+                ad_group_res = ad_operations[i]["ad_group_resource"]
+
+                # Check if this ad group had a creation failure
+                if ad_group_res in failure_map:
+                    results.append(
+                        ProcessingResult(
+                            customer_id=customer_id,
+                            ad_group_id=inp.ad_group_id,
+                            success=False,
+                            error=f"Ad creation failed: {failure_map[ad_group_res]}",
+                            operations_count=0
+                        )
+                    )
+                elif i < len(new_ad_resources):
+                    # Successfully created
                     results.append(
                         ProcessingResult(
                             customer_id=customer_id,
@@ -308,13 +330,13 @@ class ThemaAdsProcessor:
                         )
                     )
                 else:
-                    # Should not happen, but handle gracefully
+                    # Shouldn't happen, but handle gracefully
                     results.append(
                         ProcessingResult(
                             customer_id=customer_id,
                             ad_group_id=inp.ad_group_id,
                             success=False,
-                            error="Ad creation failed (no resource returned)",
+                            error="Ad creation failed (no resource returned, no error info)",
                             operations_count=0
                         )
                     )
