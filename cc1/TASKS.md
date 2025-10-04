@@ -10,6 +10,7 @@ _Tasks currently being worked on_
 ## Completed
 _Finished tasks (move here when done)_
 
+- [x] Add automatic job chunking for large discoveries (splits into optimal-sized jobs, default 50k items per job, user-configurable 10k-100k) #claude-session:2025-10-04
 - [x] Implement 503 error handling with extended retry logic (60s, 180s, 540s, 1620s exponential backoff for Service Unavailable errors) #claude-session:2025-10-04
 - [x] Reduce default batch_size from 7500 to 5000 to avoid rate limits and 503 errors #claude-session:2025-10-04
 - [x] Add customer processing delays (30s between customers) to prevent API rate limiting #claude-session:2025-10-04

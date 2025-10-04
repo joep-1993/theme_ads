@@ -68,7 +68,8 @@ def convert_scientific_notation(value: str) -> str:
 async def discover_ad_groups(
     background_tasks: BackgroundTasks = None,
     limit: int = None,
-    batch_size: int = 7500
+    batch_size: int = 5000,
+    job_chunk_size: int = 50000
 ):
     """
     Auto-discover ad groups from Google Ads MCC account.
@@ -77,12 +78,13 @@ async def discover_ad_groups(
 
     Args:
         limit: Optional limit on number of ad groups to discover
-        batch_size: Batch size for API queries (default: 7500)
+        batch_size: Batch size for API queries (default: 5000)
+        job_chunk_size: Maximum items per job (splits large discoveries into multiple jobs, default: 50000)
     """
     import logging
     logger = logging.getLogger(__name__)
 
-    logger.info(f"Discover parameters: limit={limit}, batch_size={batch_size}")
+    logger.info(f"Discover parameters: limit={limit}, batch_size={batch_size}, job_chunk_size={job_chunk_size}")
 
     try:
         from pathlib import Path
@@ -251,20 +253,39 @@ async def discover_ad_groups(
                 "total_items": 0
             }
 
-        # Create job with batch_size
+        # Split into multiple jobs if needed
         from backend.thema_ads_service import thema_ads_service
-        job_id = thema_ads_service.create_job(input_data, batch_size=batch_size)
+        job_ids = []
+        total_items = len(input_data)
 
-        # Automatically start the job
-        if background_tasks:
-            background_tasks.add_task(thema_ads_service.process_job, job_id)
+        # Calculate number of chunks needed
+        num_chunks = (total_items + job_chunk_size - 1) // job_chunk_size
+
+        if num_chunks > 1:
+            logger.info(f"Splitting {total_items} ad groups into {num_chunks} jobs of max {job_chunk_size} items each")
+
+        for chunk_idx in range(num_chunks):
+            start_idx = chunk_idx * job_chunk_size
+            end_idx = min(start_idx + job_chunk_size, total_items)
+            chunk_data = input_data[start_idx:end_idx]
+
+            # Create job for this chunk
+            job_id = thema_ads_service.create_job(chunk_data, batch_size=batch_size)
+            job_ids.append(job_id)
+            logger.info(f"Created job {job_id} with {len(chunk_data)} items (chunk {chunk_idx + 1}/{num_chunks})")
+
+            # Automatically start the job
+            if background_tasks:
+                background_tasks.add_task(thema_ads_service.process_job, job_id)
 
         return {
-            "job_id": job_id,
-            "total_items": len(input_data),
+            "job_ids": job_ids,
+            "total_items": total_items,
+            "jobs_created": len(job_ids),
+            "items_per_job": job_chunk_size,
             "status": "processing",
             "customers_found": len(beslist_customers),
-            "ad_groups_discovered": len(input_data)
+            "ad_groups_discovered": total_items
         }
 
     except HTTPException:

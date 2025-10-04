@@ -74,6 +74,11 @@
                                     <input type="number" class="form-control" id="discoverBatchSize" value="5000" min="1000" max="10000" style="max-width: 300px;">
                                     <small class="text-muted">Number of items per API batch query (1000-10000, default: 5000)</small>
                                 </div>
+                                <div class="mb-3">
+                                    <label for="discoverJobChunkSize" class="form-label">Job Chunk Size</label>
+                                    <input type="number" class="form-control" id="discoverJobChunkSize" value="50000" min="10000" max="100000" step="10000" style="max-width: 300px;">
+                                    <small class="text-muted">Max items per job - large discoveries split into multiple jobs (10k-100k, default: 50k)</small>
+                                </div>
                                 <button class="btn btn-primary" onclick="discoverAdGroups()" id="discoverBtn">
                                     <i class="bi bi-search"></i> Discover & Process Ad Groups
                                 </button>

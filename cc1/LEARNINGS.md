@@ -636,6 +636,43 @@ except GoogleAdsException as e:
 - **Key Insight**: 503 errors need minutes to recover (API capacity), not seconds (transient network)
 - **Result**: Jobs that previously failed after 3 quick retries now succeed after waiting for API recovery
 
+### Automatic Job Chunking for Large-Scale Processing
+- **Pattern**: Split large discoveries into multiple smaller jobs automatically
+- **Benefit**: Prevents 503 errors, improves reliability, enables parallel processing
+- **Implementation**:
+```python
+# Backend: Split input data into chunks
+job_chunk_size = 50000  # Default, user-configurable 10k-100k
+num_chunks = (total_items + job_chunk_size - 1) // job_chunk_size
+
+job_ids = []
+for chunk_idx in range(num_chunks):
+    start_idx = chunk_idx * job_chunk_size
+    end_idx = min(start_idx + job_chunk_size, total_items)
+    chunk_data = input_data[start_idx:end_idx]
+
+    # Create separate job for each chunk
+    job_id = create_job(chunk_data, batch_size=batch_size)
+    job_ids.append(job_id)
+
+    # Start processing in background
+    background_tasks.add_task(process_job, job_id)
+
+return {"job_ids": job_ids, "jobs_created": len(job_ids)}
+
+# Frontend: Display multiple jobs
+if (multipleJobs) {
+    message = `${jobs_created} jobs created (split into chunks of ~${items_per_job} each)`;
+}
+```
+- **Example**: 240k ad groups → 5 jobs of 48k each (instead of 1 massive 240k job)
+- **Benefits**:
+  - Smaller jobs less likely to hit API limits
+  - If one job fails, others continue
+  - Can process multiple jobs in parallel
+  - Easier to monitor and troubleshoot
+- **Configuration**: User-adjustable chunk size (10k for safety, 50k default, 100k for speed)
+
 ### Rate Limiting Strategy for Google Ads API
 - **Pattern**: Multi-layer rate limiting to prevent 503 errors
 - **Layers**:
@@ -644,6 +681,7 @@ except GoogleAdsException as e:
   3. **Customer Delays**: Wait between customers (30s)
   4. **Concurrency Limits**: Max parallel customers (5 concurrent)
   5. **Extended Retries**: Long waits for 503 errors (up to 27 minutes)
+  6. **Job Chunking**: Split large jobs into smaller chunks (50k items per job default)
 - **Configuration**:
 ```python
 # config.py - Performance tuning

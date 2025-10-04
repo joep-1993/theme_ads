@@ -54,6 +54,7 @@ async function uploadCSV() {
 async function discoverAdGroups() {
     const limit = document.getElementById('discoverLimit').value;
     const batchSize = document.getElementById('discoverBatchSize').value;
+    const jobChunkSize = document.getElementById('discoverJobChunkSize').value;
     const resultDiv = document.getElementById('discoverResult');
     const btn = document.getElementById('discoverBtn');
 
@@ -64,6 +65,7 @@ async function discoverAdGroups() {
         const params = new URLSearchParams();
         if (limit) params.append('limit', limit);
         params.append('batch_size', batchSize);
+        params.append('job_chunk_size', jobChunkSize);
 
         const response = await fetch(`/api/thema-ads/discover?${params}`, {
             method: 'POST'
@@ -80,15 +82,22 @@ async function discoverAdGroups() {
                     </div>
                 `;
             } else {
+                const jobsList = data.job_ids ? data.job_ids.join(', ') : 'N/A';
+                const multipleJobs = data.jobs_created > 1;
+
                 resultDiv.innerHTML = `
                     <div class="alert alert-success">
-                        <strong>Success!</strong> Job ${data.job_id} created.<br>
-                        Found ${data.ad_groups_discovered} ad groups to process.
+                        <strong>Success!</strong> ${multipleJobs ? data.jobs_created + ' jobs' : 'Job ' + data.job_ids[0]} created.<br>
+                        Found ${data.ad_groups_discovered} ad groups to process${multipleJobs ? ` (split into ${data.jobs_created} jobs of ~${Math.ceil(data.total_items / data.jobs_created)} items each)` : ''}.<br>
+                        ${multipleJobs ? 'Job IDs: ' + jobsList : ''}
                         Processing started automatically.
                     </div>
                 `;
-                currentJobId = data.job_id;
-                startPolling(data.job_id);
+                // Start polling for all jobs
+                if (data.job_ids && data.job_ids.length > 0) {
+                    currentJobId = data.job_ids[0];
+                    startPolling(data.job_ids[0]);
+                }
             }
         } else {
             resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.detail}</div>`;
