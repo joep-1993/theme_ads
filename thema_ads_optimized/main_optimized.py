@@ -289,9 +289,9 @@ class ThemaAdsProcessor:
                 # Map label operations to new ad resources
                 new_label_ops = []
                 for ad_res in new_ad_resources:
-                    # Each ad gets SINGLES_DAY and THEMA_AD labels
+                    # Each ad gets SINGLES_DAY label (THEMA_AD disabled to reduce API operations)
                     new_label_ops.append((ad_res, labels["SINGLES_DAY"]))
-                    new_label_ops.append((ad_res, labels["THEMA_AD"]))
+                    # new_label_ops.append((ad_res, labels["THEMA_AD"]))  # Disabled
 
                 await label_ads_batch(self.client, customer_id, new_label_ops)
 
@@ -429,7 +429,7 @@ class ThemaAdsProcessor:
         # Build label operations
         ad_labels = []  # Will be filled after ad creation
         ag_labels = [
-            (ad_group_resource, labels["BF_2025"]),
+            # (ad_group_resource, labels["BF_2025"]),  # Disabled to reduce API operations
             (ad_group_resource, labels["SD_DONE"])
         ]
 

@@ -39,13 +39,18 @@ _Technical reference for the project. Update when: architecture changes, new pat
 4. **Direct Ad Query** - 74% fewer queries using cross-resource filtering
 5. **Customer Account Whitelisting** - Use static file-based customer ID list instead of dynamic MCC query to avoid CANCELED accounts (eliminates permission errors, faster discovery)
 6. **Automatic Job Chunking** - Large discoveries split into optimal-sized jobs (default 50k items/job, configurable 10k-100k)
-7. **Rate Limiting** - Multi-layer approach to prevent 503 errors:
+7. **API Quota Optimization** - Reduced from 6 to 4 operations per ad group (33% savings):
+   - Disabled THEMA_AD label on new ads
+   - Disabled BF_2025 label on ad groups
+   - Kept essential labels: SINGLES_DAY (new ad), THEMA_ORIGINAL (old ad), SD_DONE (ad group)
+8. **Rate Limiting** - Multi-layer approach to prevent 503 errors:
    - Batch size: 5000 (reduced from 7500)
    - Customer delays: 30s between customers
    - Batch delays: 2s between API calls
    - Concurrency: 5 max concurrent customers (reduced from 10)
    - Job chunking: 50k items per job max
-8. **Extended 503 Retry Logic** - Exponential backoff with long waits (60s, 180s, 540s, 1620s) for Service Unavailable errors
+   - Operation reduction: 4 ops/ad group (from 6)
+9. **Extended 503 Retry Logic** - Exponential backoff with long waits (60s, 180s, 540s, 1620s) for Service Unavailable errors
 
 ### Reliability
 1. **Idempotent Processing** - SD_DONE labels prevent duplicate processing

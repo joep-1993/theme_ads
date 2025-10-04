@@ -673,8 +673,42 @@ if (multipleJobs) {
   - Easier to monitor and troubleshoot
 - **Configuration**: User-adjustable chunk size (10k for safety, 50k default, 100k for speed)
 
+### Google Ads API Quota Management
+- **Problem**: Google Ads API has strict daily operation limits (15,000/day for Basic access, ~1M/day for Standard access)
+- **Impact**: Large-scale jobs (100k+ ad groups) can consume millions of operations and hit quota limits
+- **Solution**: Reduce operations per ad group by disabling non-essential labels
+```python
+# ❌ BEFORE: 6 operations per ad group
+# 1. Create RSA ad
+# 2. Label new ad with SINGLES_DAY
+# 3. Label new ad with THEMA_AD
+# 4. Label old ad with THEMA_ORIGINAL
+# 5. Label ad group with BF_2025
+# 6. Label ad group with SD_DONE
+
+# ✅ AFTER: 4 operations per ad group (33% reduction)
+# 1. Create RSA ad
+# 2. Label new ad with SINGLES_DAY
+# 3. Label old ad with THEMA_ORIGINAL
+# 4. Label ad group with SD_DONE (critical for preventing reprocessing)
+
+# Disabled labels (not essential for tracking)
+ag_labels = [
+    # (ad_group_resource, labels["BF_2025"]),  # Disabled
+    (ad_group_resource, labels["SD_DONE"])     # Keep - prevents reprocessing
+]
+
+new_label_ops = []
+for ad_res in new_ad_resources:
+    new_label_ops.append((ad_res, labels["SINGLES_DAY"]))
+    # new_label_ops.append((ad_res, labels["THEMA_AD"]))  # Disabled
+```
+- **Savings Example**: 240k ad groups × 2 operations = 480k operations saved
+- **Key Insight**: Only SD_DONE label on ad group is critical; other labels are for organization/reporting but not functionality
+- **Trade-off**: Less granular filtering in Google Ads UI, but 33% faster processing and lower quota consumption
+
 ### Rate Limiting Strategy for Google Ads API
-- **Pattern**: Multi-layer rate limiting to prevent 503 errors
+- **Pattern**: Multi-layer rate limiting to prevent 503 errors and quota exhaustion
 - **Layers**:
   1. **Batch Size**: Limit items per query (5000 default, user-configurable)
   2. **Batch Delays**: Wait between API calls (2s between batches)
@@ -682,6 +716,7 @@ if (multipleJobs) {
   4. **Concurrency Limits**: Max parallel customers (5 concurrent)
   5. **Extended Retries**: Long waits for 503 errors (up to 27 minutes)
   6. **Job Chunking**: Split large jobs into smaller chunks (50k items per job default)
+  7. **Operation Reduction**: Disable non-essential labels (4 ops/ad group instead of 6)
 - **Configuration**:
 ```python
 # config.py - Performance tuning
