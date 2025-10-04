@@ -18,6 +18,53 @@ cd thema_ads_optimized/
 
 ## Common Issues & Solutions
 
+### Google Ads API 503 Service Unavailable Errors
+- **Error**: `503 The service is currently unavailable`
+- **Cause**: Google Ads API rate limiting or temporary service unavailability when processing large volumes
+- **Impact**: Jobs with 100k+ ad groups hitting multiple 503 errors over hours, causing customer processing failures
+- **Symptoms**: Repeated failures across multiple customers (e.g., 8696777335, 5930401821, 3114657125, 5807833423, etc.)
+- **Solution**: Multi-layered rate limiting and extended retry strategy
+```python
+# 1. Special handling for 503 errors in retry decorator
+from google.api_core.exceptions import ServiceUnavailable
+
+def async_retry(max_attempts: int = 5, delay: float = 2.0, backoff: float = 2.0):
+    async def wrapper(*args, **kwargs):
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await func(*args, **kwargs)
+            except ServiceUnavailable as e:
+                if attempt < max_attempts:
+                    # Much longer delays for 503: 60s, 180s, 540s, 1620s
+                    retry_delay = 60 * (3 ** (attempt - 1))
+                    await asyncio.sleep(retry_delay)
+                else:
+                    raise
+
+# 2. Reduce batch size to lower API load
+batch_size = 5000  # Reduced from 7500
+
+# 3. Add delays between customers
+async def process_with_limit(customer_id, customer_inputs):
+    result = await process_customer(customer_id, customer_inputs)
+    await asyncio.sleep(30.0)  # 30s delay between customers
+    return result
+
+# 4. Reduce concurrent customer processing
+max_concurrent_customers = 5  # Reduced from 10
+
+# 5. Increase delays between batch operations
+time.sleep(2.0)  # Increased from 0.5s between API batches
+```
+- **Configuration Changes**:
+  - `BATCH_SIZE`: 7500 → 5000
+  - `MAX_CONCURRENT_CUSTOMERS`: 10 → 5
+  - `API_RETRY_ATTEMPTS`: 3 → 5
+  - `API_RETRY_DELAY`: 1.0s → 2.0s
+  - `API_BATCH_DELAY`: 0.5s → 2.0s
+  - `CUSTOMER_DELAY`: New, 30.0s
+- **Result**: Extended retry windows give Google's API time to recover, lower concurrency reduces load
+
 ### Google Ads CANCELED Accounts Cause PERMISSION_DENIED Errors
 - **Error**: `StatusCode.PERMISSION_DENIED: The caller does not have permission` with `CUSTOMER_NOT_ENABLED: The customer account can't be accessed because it is not yet enabled or has been deactivated`
 - **Cause**: MCC queries return all customer accounts including CANCELED/deactivated accounts
@@ -561,6 +608,56 @@ for customer_id in customer_ids:
 ```
 - **Alternative Approach**: Query MCC with status filter (requires additional API call and filtering logic)
 - **Maintenance**: Update file when account status changes (new accounts added, old accounts deactivated)
+
+### 503 Error Handling with Exponential Backoff Pattern
+- **Pattern**: Separate retry logic for transient vs permanent errors
+- **Benefit**: Recovers from temporary API unavailability without giving up too early
+- **Implementation**:
+```python
+# Special case for 503 errors - much longer waits
+except ServiceUnavailable as e:
+    if attempt < max_attempts:
+        # Exponential with base 3: 60s → 180s → 540s → 1620s (27min)
+        retry_delay = 60 * (3 ** (attempt - 1))
+        logger.warning(f"503 error, waiting {retry_delay}s before retry {attempt}/{max_attempts}")
+        await asyncio.sleep(retry_delay)
+    else:
+        raise
+
+# Regular errors - standard exponential backoff
+except GoogleAdsException as e:
+    if attempt < max_attempts:
+        # Standard backoff: 2s → 4s → 8s → 16s
+        await asyncio.sleep(current_delay)
+        current_delay *= backoff
+    else:
+        raise
+```
+- **Key Insight**: 503 errors need minutes to recover (API capacity), not seconds (transient network)
+- **Result**: Jobs that previously failed after 3 quick retries now succeed after waiting for API recovery
+
+### Rate Limiting Strategy for Google Ads API
+- **Pattern**: Multi-layer rate limiting to prevent 503 errors
+- **Layers**:
+  1. **Batch Size**: Limit items per query (5000 default, user-configurable)
+  2. **Batch Delays**: Wait between API calls (2s between batches)
+  3. **Customer Delays**: Wait between customers (30s)
+  4. **Concurrency Limits**: Max parallel customers (5 concurrent)
+  5. **Extended Retries**: Long waits for 503 errors (up to 27 minutes)
+- **Configuration**:
+```python
+# config.py - Performance tuning
+PerformanceConfig(
+    max_concurrent_customers=5,      # Reduced from 10
+    batch_size=5000,                  # Reduced from 7500
+    api_retry_attempts=5,             # Increased from 3
+    api_retry_delay=2.0,              # Increased from 1.0
+    api_batch_delay=2.0,              # Increased from 0.5
+    customer_delay=30.0               # New parameter
+)
+```
+- **Trade-off**: Slower processing but much higher success rate on large jobs
+- **Use Case**: Jobs with 100k+ ad groups that previously hit 503 errors repeatedly
 
 ### Discovery Optimization: Direct Ad Query vs Nested Queries
 - **Problem**: Discovery was slow for large accounts (146k ad groups took ~271 API queries)

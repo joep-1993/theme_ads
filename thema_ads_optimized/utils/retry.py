@@ -5,12 +5,16 @@ import logging
 from functools import wraps
 from typing import Callable, Any
 from google.ads.googleads.errors import GoogleAdsException
+from google.api_core.exceptions import ServiceUnavailable
 
 logger = logging.getLogger(__name__)
 
 
-def async_retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
-    """Decorator for async functions with exponential backoff retry."""
+def async_retry(max_attempts: int = 5, delay: float = 2.0, backoff: float = 2.0):
+    """Decorator for async functions with exponential backoff retry.
+
+    Handles 503 errors with extended delays (60s, 180s, 540s, 1620s).
+    """
 
     def decorator(func: Callable) -> Callable:
         @wraps(func)
@@ -21,6 +25,24 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0)
             for attempt in range(1, max_attempts + 1):
                 try:
                     return await func(*args, **kwargs)
+
+                except ServiceUnavailable as e:
+                    # Handle 503 errors with much longer delays
+                    last_exception = e
+
+                    if attempt < max_attempts:
+                        # Use much longer delays for 503 errors (exponential: 60s, 180s, 540s, 1620s)
+                        retry_delay = 60 * (3 ** (attempt - 1))
+                        logger.warning(
+                            f"503 Service Unavailable in {func.__name__}. "
+                            f"Attempt {attempt}/{max_attempts}. "
+                            f"Waiting {retry_delay}s before retry... Error: {str(e)}"
+                        )
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        logger.error(f"All {max_attempts} attempts failed for {func.__name__} due to 503 errors")
+                        raise last_exception
+
                 except GoogleAdsException as e:
                     last_exception = e
 
@@ -58,8 +80,11 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0)
     return decorator
 
 
-def sync_retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
-    """Decorator for sync functions with exponential backoff retry."""
+def sync_retry(max_attempts: int = 5, delay: float = 2.0, backoff: float = 2.0):
+    """Decorator for sync functions with exponential backoff retry.
+
+    Handles 503 errors with extended delays (60s, 180s, 540s, 1620s).
+    """
 
     def decorator(func: Callable) -> Callable:
         @wraps(func)
@@ -71,6 +96,24 @@ def sync_retry(max_attempts: int = 3, delay: float = 1.0, backoff: float = 2.0):
             for attempt in range(1, max_attempts + 1):
                 try:
                     return func(*args, **kwargs)
+
+                except ServiceUnavailable as e:
+                    # Handle 503 errors with much longer delays
+                    last_exception = e
+
+                    if attempt < max_attempts:
+                        # Use much longer delays for 503 errors (exponential: 60s, 180s, 540s, 1620s)
+                        retry_delay = 60 * (3 ** (attempt - 1))
+                        logger.warning(
+                            f"503 Service Unavailable in {func.__name__}. "
+                            f"Attempt {attempt}/{max_attempts}. "
+                            f"Waiting {retry_delay}s before retry... Error: {str(e)}"
+                        )
+                        time.sleep(retry_delay)
+                    else:
+                        logger.error(f"All {max_attempts} attempts failed for {func.__name__} due to 503 errors")
+                        raise last_exception
+
                 except GoogleAdsException as e:
                     last_exception = e
 

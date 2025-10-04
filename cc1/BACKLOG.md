@@ -4,6 +4,8 @@ _Future features and improvements. Update when: ideas emerge, features are plann
 ## Ideas
 _Features under consideration_
 
+- Adaptive rate limiting based on API response patterns (monitor 503 error frequency and automatically adjust batch size, delays, and concurrency) #impact:medium #effort:large #type:improvement
+
 ## Planned
 _Approved features ready for development_
 

@@ -20,11 +20,13 @@ class GoogleAdsConfig:
 @dataclass
 class PerformanceConfig:
     """Performance tuning settings."""
-    max_concurrent_customers: int = 10
+    max_concurrent_customers: int = 5  # Reduced from 10 to avoid overload
     max_concurrent_operations: int = 50
-    batch_size: int = 1000
-    api_retry_attempts: int = 3
-    api_retry_delay: float = 1.0
+    batch_size: int = 5000  # Reduced from 7500 to avoid 503 errors
+    api_retry_attempts: int = 5  # Increased for 503 retry handling
+    api_retry_delay: float = 2.0  # Increased from 1.0
+    api_batch_delay: float = 2.0  # Increased from 0.5 to avoid rate limits
+    customer_delay: float = 30.0  # Delay between customers to avoid rate limits
     enable_caching: bool = True
 
 
@@ -67,11 +69,13 @@ def load_config_from_env() -> AppConfig:
     )
 
     performance_config = PerformanceConfig(
-        max_concurrent_customers=int(os.getenv("MAX_CONCURRENT_CUSTOMERS", "10")),
+        max_concurrent_customers=int(os.getenv("MAX_CONCURRENT_CUSTOMERS", "5")),
         max_concurrent_operations=int(os.getenv("MAX_CONCURRENT_OPERATIONS", "50")),
-        batch_size=int(os.getenv("BATCH_SIZE", "1000")),
-        api_retry_attempts=int(os.getenv("API_RETRY_ATTEMPTS", "3")),
-        api_retry_delay=float(os.getenv("API_RETRY_DELAY", "1.0")),
+        batch_size=int(os.getenv("BATCH_SIZE", "5000")),
+        api_retry_attempts=int(os.getenv("API_RETRY_ATTEMPTS", "5")),
+        api_retry_delay=float(os.getenv("API_RETRY_DELAY", "2.0")),
+        api_batch_delay=float(os.getenv("API_BATCH_DELAY", "2.0")),
+        customer_delay=float(os.getenv("CUSTOMER_DELAY", "30.0")),
         enable_caching=os.getenv("ENABLE_CACHING", "true").lower() == "true"
     )
 

@@ -10,7 +10,7 @@ from utils.retry import async_retry
 logger = logging.getLogger(__name__)
 
 
-@async_retry(max_attempts=3, delay=1.0)
+@async_retry(max_attempts=5, delay=2.0, backoff=2.0)
 async def create_rsa_batch(
     client: GoogleAdsClient,
     customer_id: str,
@@ -131,6 +131,11 @@ async def create_rsa_batch(
                 logger.info(f"Created {len(result['resources'])} RSAs in chunk {chunk_num}/{total_chunks}")
             if result["failures"]:
                 logger.warning(f"Failed to create {len(result['failures'])} RSAs in chunk {chunk_num}/{total_chunks}")
+
+            # Add delay between chunks to avoid rate limits (except for last chunk)
+            if chunk_num < total_chunks:
+                import time
+                time.sleep(2.0)  # 2s delay between batches to avoid 503 errors
 
         logger.info(f"Created {len(all_resource_names)} RSAs total, {len(all_failures)} failures across {total_chunks} chunks")
         return {"resources": all_resource_names, "failures": all_failures}

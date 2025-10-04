@@ -34,10 +34,16 @@ _Technical reference for the project. Update when: architecture changes, new pat
 
 ### Performance Optimizations
 1. **Batch API Operations** - Reduce API calls by batching (up to 10K operations per request)
-2. **Async Processing** - Parallel customer processing with semaphore control
+2. **Async Processing** - Parallel customer processing with semaphore control (5 concurrent customers)
 3. **Prefetch Strategy** - Load all data upfront to eliminate redundant API calls
 4. **Direct Ad Query** - 74% fewer queries using cross-resource filtering
 5. **Customer Account Whitelisting** - Use static file-based customer ID list instead of dynamic MCC query to avoid CANCELED accounts (eliminates permission errors, faster discovery)
+6. **Rate Limiting** - Multi-layer approach to prevent 503 errors:
+   - Batch size: 5000 (reduced from 7500)
+   - Customer delays: 30s between customers
+   - Batch delays: 2s between API calls
+   - Concurrency: 5 max concurrent customers (reduced from 10)
+7. **Extended 503 Retry Logic** - Exponential backoff with long waits (60s, 180s, 540s, 1620s) for Service Unavailable errors
 
 ### Reliability
 1. **Idempotent Processing** - SD_DONE labels prevent duplicate processing
@@ -46,10 +52,30 @@ _Technical reference for the project. Update when: architecture changes, new pat
 4. **Error Handling** - Distinguish between failed, skipped, and successful items
 
 ### API Integration
-1. **Configurable Batch Size** - User-adjustable for rate limiting or performance
+1. **Configurable Batch Size** - User-adjustable (1000-10000, default: 5000) for rate limiting or performance
 2. **CSV Flexibility** - Support minimal or full CSV formats
 3. **Excel Compatibility** - Handle scientific notation and encoding issues
 4. **Ad Group Name Lookups** - Resolve IDs from names to avoid Excel precision loss
+
+## Configuration
+
+### Environment Variables
+- `GOOGLE_DEVELOPER_TOKEN` - Google Ads API developer token
+- `GOOGLE_REFRESH_TOKEN` - OAuth refresh token
+- `GOOGLE_CLIENT_ID` - OAuth client ID
+- `GOOGLE_CLIENT_SECRET` - OAuth client secret
+- `GOOGLE_LOGIN_CUSTOMER_ID` - MCC account ID
+- `MAX_CONCURRENT_CUSTOMERS` - Parallel customer processing limit (default: 5)
+- `BATCH_SIZE` - Items per API query (default: 5000)
+- `API_RETRY_ATTEMPTS` - Retry attempts for failed API calls (default: 5)
+- `API_RETRY_DELAY` - Initial retry delay in seconds (default: 2.0)
+- `API_BATCH_DELAY` - Delay between API batches in seconds (default: 2.0)
+- `CUSTOMER_DELAY` - Delay between processing customers in seconds (default: 30.0)
+
+### Performance Tuning
+- **For speed**: Increase `BATCH_SIZE` to 7500-10000, reduce `CUSTOMER_DELAY` to 10-15s
+- **For stability**: Keep defaults (BATCH_SIZE=5000, CUSTOMER_DELAY=30s)
+- **For rate-limited scenarios**: Reduce `BATCH_SIZE` to 1000-3000, increase `CUSTOMER_DELAY` to 60s
 
 ## External Dependencies
 
@@ -84,7 +110,7 @@ theme_ads/
 │   │   └── generators.py           # Template generation
 │   └── utils/                      # Utilities
 │       ├── cache.py                # Caching logic
-│       └── retry.py                # Retry logic
+│       └── retry.py                # Retry logic with 503 ServiceUnavailable handling
 ├── cc1/                            # CC1 documentation
 │   ├── TASKS.md
 │   ├── LEARNINGS.md

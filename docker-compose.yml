@@ -1,0 +1,28 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8002:8000"  # Access at http://localhost:8002
+    volumes:
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+      - ./thema_ads_optimized:/app/thema_ads_optimized
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/thema_ads
+    depends_on:
+      - db
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload --timeout-keep-alive 600 --timeout-graceful-shutdown 60
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: thema_ads
+    ports:
+      - "5434:5432"  # Avoid conflicts
+    volumes:
+      - thema_ads_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  thema_ads_postgres_data:

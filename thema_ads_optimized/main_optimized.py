@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 class ThemaAdsProcessor:
     """High-performance processor for themed ad campaigns."""
 
-    def __init__(self, config, batch_size: int = 7500):
+    def __init__(self, config, batch_size: int = 5000):
         self.config = config
         self.client = initialize_client(config.google_ads)
         self.theme = "singles_day"  # Configurable
@@ -71,7 +71,10 @@ class ThemaAdsProcessor:
 
         async def process_with_limit(customer_id, customer_inputs):
             async with semaphore:
-                return await self.process_customer(customer_id, customer_inputs)
+                result = await self.process_customer(customer_id, customer_inputs)
+                # Add delay between customers to avoid rate limits
+                await asyncio.sleep(self.config.performance.customer_delay)
+                return result
 
         tasks = [
             process_with_limit(cid, inputs_list)

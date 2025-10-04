@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application
 COPY backend/ /app/backend/
 COPY frontend/ /app/frontend/
-COPY thema_ads_project/ /app/thema_ads_project/
+COPY thema_ads_optimized/ /app/thema_ads_optimized/
 
 # Expose port
 EXPOSE 8000

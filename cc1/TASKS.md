@@ -10,6 +10,10 @@ _Tasks currently being worked on_
 ## Completed
 _Finished tasks (move here when done)_
 
+- [x] Implement 503 error handling with extended retry logic (60s, 180s, 540s, 1620s exponential backoff for Service Unavailable errors) #claude-session:2025-10-04
+- [x] Reduce default batch_size from 7500 to 5000 to avoid rate limits and 503 errors #claude-session:2025-10-04
+- [x] Add customer processing delays (30s between customers) to prevent API rate limiting #claude-session:2025-10-04
+- [x] Update frontend batch_size default from 7500 to 5000 in both CSV and Auto-Discover tabs #claude-session:2025-10-04
 - [x] Fix REQUEST_TOO_LARGE error with automatic chunk size reduction (recursively halves chunk size from 10K down to 100 until success) #claude-session:2025-10-04
 - [x] Fix error handling for complete chunk failures (track failures per ad group with specific error messages instead of generic "no resource returned") #claude-session:2025-10-04
 - [x] Filter discovery to use only valid customer accounts from whitelist file (eliminates 16 CANCELED accounts causing PERMISSION_DENIED errors) #claude-session:2025-10-04
