@@ -113,8 +113,11 @@ async def create_rsa_batch(
         all_resource_names = []
         all_failures = []
 
+        # Reduced batch size to avoid overwhelming Google's ad policy crawler
         # Google Ads API limit: 10,000 operations per request
-        BATCH_LIMIT = 10000
+        # But using smaller batches (100) to prevent DESTINATION_NOT_WORKING errors
+        # caused by CloudFront rate limiting Google's crawler
+        BATCH_LIMIT = 100
 
         # Process in chunks
         for chunk_start in range(0, len(ad_data_list), BATCH_LIMIT):
@@ -132,10 +135,10 @@ async def create_rsa_batch(
             if result["failures"]:
                 logger.warning(f"Failed to create {len(result['failures'])} RSAs in chunk {chunk_num}/{total_chunks}")
 
-            # Add delay between chunks to avoid rate limits (except for last chunk)
+            # Add delay between chunks to avoid rate limits and give Google's crawler time
             if chunk_num < total_chunks:
                 import time
-                time.sleep(2.0)  # 2s delay between batches to avoid 503 errors
+                time.sleep(5.0)  # 5s delay between batches to prevent overwhelming CloudFront/Google crawler
 
         logger.info(f"Created {len(all_resource_names)} RSAs total, {len(all_failures)} failures across {total_chunks} chunks")
         return {"resources": all_resource_names, "failures": all_failures}

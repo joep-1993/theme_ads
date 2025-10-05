@@ -33,7 +33,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
 ## Key Patterns
 
 ### Performance Optimizations
-1. **Batch API Operations** - Reduce API calls by batching (up to 10K operations per request)
+1. **Batch API Operations** - Reduce API calls by batching (100 ads per creation batch to prevent crawler overload)
 2. **Async Processing** - Parallel customer processing with semaphore control (5 concurrent customers)
 3. **Prefetch Strategy** - Load all data upfront to eliminate redundant API calls
 4. **Direct Ad Query** - 74% fewer queries using cross-resource filtering
@@ -43,14 +43,18 @@ _Technical reference for the project. Update when: architecture changes, new pat
    - Disabled THEMA_AD label on new ads
    - Disabled BF_2025 label on ad groups
    - Kept essential labels: SINGLES_DAY (new ad), THEMA_ORIGINAL (old ad), SD_DONE (ad group)
-8. **Rate Limiting** - Multi-layer approach to prevent 503 errors:
-   - Batch size: 5000 (reduced from 7500)
+8. **Google Crawler Rate Limiting Prevention** - Small batches to prevent DESTINATION_NOT_WORKING errors:
+   - Ad creation batch size: 100 (down from 10,000)
+   - Batch delays: 5s between ad creation batches
+   - Prevents CloudFront from blocking Google's policy crawler
+9. **Rate Limiting** - Multi-layer approach to prevent 503 errors:
+   - Query batch size: 5000 (reduced from 7500)
    - Customer delays: 30s between customers
-   - Batch delays: 2s between API calls
+   - Batch delays: 2s between API queries
    - Concurrency: 5 max concurrent customers (reduced from 10)
    - Job chunking: 50k items per job max
    - Operation reduction: 4 ops/ad group (from 6)
-9. **Extended 503 Retry Logic** - Exponential backoff with long waits (60s, 180s, 540s, 1620s) for Service Unavailable errors
+10. **Extended 503 Retry Logic** - Exponential backoff with long waits (60s, 180s, 540s, 1620s) for Service Unavailable errors
 
 ### Reliability
 1. **Idempotent Processing** - SD_DONE labels prevent duplicate processing

@@ -673,6 +673,32 @@ if (multipleJobs) {
   - Easier to monitor and troubleshoot
 - **Configuration**: User-adjustable chunk size (10k for safety, 50k default, 100k for speed)
 
+### Google Ads Policy Crawler Rate Limiting (DESTINATION_NOT_WORKING)
+- **Problem**: When creating ads in large batches, Google's policy crawler validates all destination URLs simultaneously
+- **Impact**: CloudFront/WAF detects burst of requests from Google's crawler as bot attack → blocks requests → ads rejected with DESTINATION_NOT_WORKING
+- **Symptoms**: All ads fail with "DESTINATION_NOT_WORKING" even though URLs work fine in browsers and Google Search Console
+- **Root Cause**: Creating 5,000-10,000 ads at once → Google crawler tries to validate all URLs immediately → CloudFront rate limits/blocks crawler
+- **Solution**: Reduce ad creation batch size and add delays
+```python
+# ❌ BEFORE: Large batches overwhelm crawler
+BATCH_LIMIT = 10000  # Create 10k ads at once
+time.sleep(2.0)      # Only 2s between batches
+
+# Result: Google crawler hits CloudFront with 10k URL checks instantly
+# → CloudFront blocks/rate limits → all ads rejected
+
+# ✅ AFTER: Small batches spread over time
+BATCH_LIMIT = 100    # Create only 100 ads per batch
+time.sleep(5.0)      # 5s delay between batches
+
+# Result: Google crawler checks 100 URLs every 5 seconds
+# → CloudFront allows requests → ads approved
+```
+- **Impact**: For 5,000 ads: 50 batches × 5s = 250 seconds (~4 minutes) vs instant failure
+- **Key Insight**: Google performs policy validation (including URL crawling) BEFORE creating ads, even for PAUSED ads
+- **Trade-off**: Slower processing but much higher success rate (0% → expected 90%+)
+- **Note**: This is separate from Googlebot for Search - Google Ads uses different crawler (AdsBot-Google)
+
 ### Google Ads API Quota Management
 - **Problem**: Google Ads API has strict daily operation limits (15,000/day for Basic access, ~1M/day for Standard access)
 - **Impact**: Large-scale jobs (100k+ ad groups) can consume millions of operations and hit quota limits
