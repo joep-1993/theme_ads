@@ -109,65 +109,6 @@ async function discoverAdGroups() {
     }
 }
 
-async function runCheckup() {
-    const limit = document.getElementById('checkupLimit').value;
-    const batchSize = document.getElementById('checkupBatchSize').value;
-    const jobChunkSize = document.getElementById('checkupJobChunkSize').value;
-    const resultDiv = document.getElementById('checkupResult');
-    const btn = document.getElementById('checkupBtn');
-
-    btn.disabled = true;
-    resultDiv.innerHTML = '<div class="alert alert-info">Running check-up on ad groups with SD_DONE label...</div>';
-
-    try {
-        const params = new URLSearchParams();
-        if (limit) params.append('limit', limit);
-        params.append('batch_size', batchSize);
-        params.append('job_chunk_size', jobChunkSize);
-
-        const response = await fetch(`/api/thema-ads/checkup?${params}`, {
-            method: 'POST'
-        });
-
-        const data = await response.json();
-
-        if (response.ok) {
-            if (data.status === 'no_ad_groups_found') {
-                resultDiv.innerHTML = `
-                    <div class="alert alert-success">
-                        <strong>All good!</strong><br>
-                        All ad groups with SD_DONE label already have SINGLES_DAY ads.<br>
-                        Checked ${data.customers_checked} customer accounts.
-                    </div>
-                `;
-            } else {
-                const jobsList = data.job_ids ? data.job_ids.join(', ') : 'N/A';
-                const multipleJobs = data.jobs_created > 1;
-
-                resultDiv.innerHTML = `
-                    <div class="alert alert-warning">
-                        <strong>Check-up complete!</strong> ${multipleJobs ? data.jobs_created + ' jobs' : 'Job ' + data.job_ids[0]} created.<br>
-                        Found ${data.ad_groups_needing_repair} ad groups with SD_DONE but missing SINGLES_DAY ads${multipleJobs ? ` (split into ${data.jobs_created} jobs of ~${Math.ceil(data.total_items / data.jobs_created)} items each)` : ''}.<br>
-                        ${multipleJobs ? 'Job IDs: ' + jobsList : ''}
-                        Processing started automatically.
-                    </div>
-                `;
-                // Start polling for all jobs
-                if (data.job_ids && data.job_ids.length > 0) {
-                    currentJobId = data.job_ids[0];
-                    startPolling(data.job_ids[0]);
-                }
-            }
-        } else {
-            resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.detail}</div>`;
-        }
-    } catch (error) {
-        resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
-    } finally {
-        btn.disabled = false;
-    }
-}
-
 async function refreshJobs() {
     try {
         const response = await fetch('/api/thema-ads/jobs?limit=20');

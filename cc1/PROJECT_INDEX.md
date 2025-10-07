@@ -10,7 +10,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - **Processing**: Batch operations with pause/resume
 
 ### Key Components
-- `backend/main.py` - FastAPI API endpoints (CSV upload, auto-discovery from customer whitelist, check-up mode for verifying and repairing processed ad groups)
+- `backend/main.py` - FastAPI API endpoints (includes auto-discovery from customer whitelist)
 - `backend/thema_ads_service.py` - Business logic and job processing
 - `backend/database.py` - Database connection management
 - `thema_ads_optimized/account ids` - Whitelist of 28 active customer IDs (discovery loads from this file)
@@ -58,8 +58,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
 
 ### Reliability
 1. **Idempotent Processing** - SD_DONE labels prevent duplicate processing
-2. **Check-up & Repair** - SD_CHECKED label system for verifying processed items and fixing incomplete operations
-3. **State Persistence** - PostgreSQL tracks job and item status for resume capability
+2. **State Persistence** - PostgreSQL tracks job and item status for resume capability
 3. **Background Tasks** - FastAPI BackgroundTasks for long-running jobs
 4. **Error Handling** - Distinguish between failed, skipped, and successful items
 

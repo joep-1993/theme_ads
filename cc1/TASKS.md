@@ -10,8 +10,6 @@ _Tasks currently being worked on_
 ## Completed
 _Finished tasks (move here when done)_
 
-- [x] Optimize Check-up to respect limit parameter from start (process customers sequentially, stop immediately when limit reached, prevents full account scan) #claude-session:2025-10-07
-- [x] Add Check-up function for SD_DONE verification (third processing mode finds ad groups with SD_DONE but missing SINGLES_DAY ads, applies SD_CHECKED label to verified groups) #claude-session:2025-10-07
 - [x] Reduce ad creation batch size to prevent Google crawler rate limiting (100 ads per batch, 5s delays, prevents DESTINATION_NOT_WORKING errors from CloudFront blocking) #claude-session:2025-10-05
 - [x] Reduce API operations by disabling non-essential labels (removed THEMA_AD and BF_2025 labels, reduced from 6 to 4 operations per ad group, 33% savings) #claude-session:2025-10-05
 - [x] Add automatic job chunking for large discoveries (splits into optimal-sized jobs, default 50k items per job, user-configurable 10k-100k) #claude-session:2025-10-04
