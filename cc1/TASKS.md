@@ -4,6 +4,21 @@ _Active task tracking. Update when: starting work, completing tasks, finding blo
 ## Current Sprint
 _Active tasks for immediate work_
 
+- [ ] Re-implement Check-up function with proper testing #priority:high #estimate:4h
+  - **Purpose**: Audit ad groups with SD_DONE label, verify SINGLES_DAY ads exist, create repair jobs for missing ads
+  - **Implementation**:
+    1. Backend endpoint `/api/thema-ads/checkup` with limit, batch_size, job_chunk_size parameters
+    2. Query ad groups WITH SD_DONE label (processed)
+    3. Filter OUT ad groups WITH SD_CHECKED label (already verified)
+    4. For each unchecked ad group, verify SINGLES_DAY ad exists
+    5. Apply SD_CHECKED label to verified ad groups
+    6. Create repair jobs for ad groups missing SINGLES_DAY ads
+    7. **CRITICAL**: Respect limit parameter from start - stop processing customers when limit reached
+    8. Add progress logging (customer processing, label checks, repair jobs created)
+  - **Frontend**: Check-up tab with limit/batch size inputs, progress display
+  - **Testing**: Test with limit=10, limit=100, no limit to verify performance
+  - **Known Issue**: Previous implementation caused server hangs - debug with smaller test cases first
+
 ## In Progress
 _Tasks currently being worked on_
 
