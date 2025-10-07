@@ -34,6 +34,9 @@
                             <li class="nav-item">
                                 <a class="nav-link text-white" id="discover-tab" data-bs-toggle="tab" href="#autoDiscover" role="tab">Auto-Discover</a>
                             </li>
+                            <li class="nav-item">
+                                <a class="nav-link text-white" id="checkup-tab" data-bs-toggle="tab" href="#checkup" role="tab">Check-up</a>
+                            </li>
                         </ul>
                     </div>
                     <div class="card-body">
@@ -83,6 +86,39 @@
                                     <i class="bi bi-search"></i> Discover & Process Ad Groups
                                 </button>
                                 <div id="discoverResult" class="mt-3"></div>
+                            </div>
+
+                            <!-- Check-up Tab -->
+                            <div class="tab-pane fade" id="checkup" role="tabpanel">
+                                <p class="text-muted">
+                                    Verify ad groups with SD_DONE label and check for SINGLES_DAY ads:<br>
+                                    <small>
+                                        • Checks ad groups <strong>WITH SD_DONE label</strong> (already processed)<br>
+                                        • Skips ad groups <strong>WITH SD_CHECKED label</strong> (already verified)<br>
+                                        • Verifies <strong>SINGLES_DAY ads exist</strong><br>
+                                        • Applies <strong>SD_CHECKED label</strong> to verified ad groups<br>
+                                        • Creates <strong>repair jobs</strong> for ad groups missing SINGLES_DAY ads
+                                    </small>
+                                </p>
+                                <div class="mb-3">
+                                    <label for="checkupLimit" class="form-label">Limit (optional)</label>
+                                    <input type="number" class="form-control" id="checkupLimit" placeholder="Leave empty for no limit" min="1" max="100000" style="max-width: 300px;">
+                                    <small class="text-muted">Recommended: Start with 10-100 for testing</small>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="checkupBatchSize" class="form-label">Batch Size</label>
+                                    <input type="number" class="form-control" id="checkupBatchSize" value="5000" min="1000" max="10000" style="max-width: 300px;">
+                                    <small class="text-muted">Number of items per API batch query (1000-10000, default: 5000)</small>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="checkupJobChunkSize" class="form-label">Job Chunk Size</label>
+                                    <input type="number" class="form-control" id="checkupJobChunkSize" value="50000" min="10000" max="100000" step="10000" style="max-width: 300px;">
+                                    <small class="text-muted">Max items per repair job (10k-100k, default: 50k)</small>
+                                </div>
+                                <button class="btn btn-primary" onclick="runCheckup()" id="checkupBtn">
+                                    <i class="bi bi-check-circle"></i> Run Check-up
+                                </button>
+                                <div id="checkupResult" class="mt-3"></div>
                             </div>
                         </div>
                     </div>

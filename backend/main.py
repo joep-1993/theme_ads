@@ -655,3 +655,70 @@ async def download_successful_items(job_id: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/thema-ads/checkup")
+async def checkup_ad_groups(
+    background_tasks: BackgroundTasks = None,
+    limit: int = None,
+    batch_size: int = 5000,
+    job_chunk_size: int = 50000
+):
+    """
+    Check-up function: Audit ad groups with SD_DONE label, verify SINGLES_DAY ads exist,
+    and create repair jobs for missing ads.
+
+    Args:
+        limit: Optional limit on number of ad groups to check
+        batch_size: Batch size for API queries (default: 5000)
+        job_chunk_size: Maximum items per repair job (default: 50000)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"Checkup parameters: limit={limit}, batch_size={batch_size}, job_chunk_size={job_chunk_size}")
+
+    try:
+        from pathlib import Path
+        from dotenv import load_dotenv
+
+        # Load environment variables
+        env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+        else:
+            raise HTTPException(status_code=500, detail="Google Ads credentials not configured")
+
+        from config import load_config_from_env
+        from google_ads_client import initialize_client
+
+        config = load_config_from_env()
+        client = initialize_client(config.google_ads)
+
+        # Load customer IDs from file
+        account_ids_file = Path(__file__).parent.parent / "thema_ads_optimized" / "account ids"
+        if not account_ids_file.exists():
+            raise HTTPException(status_code=500, detail="Account IDs file not found")
+
+        with open(account_ids_file, 'r') as f:
+            customer_ids = [line.strip() for line in f if line.strip()]
+
+        logger.info(f"Loaded {len(customer_ids)} customer IDs from account ids file")
+
+        # Run checkup
+        result = await thema_ads_service.checkup_ad_groups(
+            client=client,
+            customer_ids=customer_ids,
+            limit=limit,
+            batch_size=batch_size,
+            job_chunk_size=job_chunk_size,
+            background_tasks=background_tasks
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Checkup failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

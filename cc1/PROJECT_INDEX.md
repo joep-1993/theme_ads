@@ -8,11 +8,18 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - **Database**: PostgreSQL for job persistence
 - **Google Ads**: API v28+ integration
 - **Processing**: Batch operations with pause/resume
+- **Quality Assurance**: Check-up function audits processed ad groups, verifies ad integrity, creates repair jobs
 
 ### Key Components
-- `backend/main.py` - FastAPI API endpoints (includes auto-discovery from customer whitelist)
+- `backend/main.py` - FastAPI API endpoints (CSV upload, auto-discovery, checkup)
+  - `/api/thema-ads/upload` - CSV upload and job creation
+  - `/api/thema-ads/discover` - Auto-discover ad groups from MCC
+  - `/api/thema-ads/checkup` - Audit processed ad groups, verify SINGLES_DAY ads
 - `backend/thema_ads_service.py` - Business logic and job processing
+  - `checkup_ad_groups()` - Audits ad groups with SD_DONE label, verifies SINGLES_DAY ads exist, creates repair jobs
 - `backend/database.py` - Database connection management
+- `frontend/thema-ads.html` - Web UI with 3 tabs (CSV Upload, Auto-Discover, Check-up)
+- `frontend/js/thema-ads.js` - Frontend logic including runCheckup() function
 - `thema_ads_optimized/account ids` - Whitelist of 28 active customer IDs (discovery loads from this file)
 - `thema_ads_optimized/` - CLI automation tools
 - `thema_ads_optimized/operations/` - Google Ads API operations
@@ -58,9 +65,17 @@ _Technical reference for the project. Update when: architecture changes, new pat
 
 ### Reliability
 1. **Idempotent Processing** - SD_DONE labels prevent duplicate processing
-2. **State Persistence** - PostgreSQL tracks job and item status for resume capability
-3. **Background Tasks** - FastAPI BackgroundTasks for long-running jobs
-4. **Error Handling** - Distinguish between failed, skipped, and successful items
+2. **Quality Verification** - SD_CHECKED labels track verified ad groups (checkup function)
+   - SD_DONE: Ad group has been processed (ads created/labeled)
+   - SD_CHECKED: Ad group has been audited and verified to have SINGLES_DAY ads
+   - Prevents re-checking already verified ad groups
+3. **Audit/Repair Workflow** - Checkup function for quality assurance
+   - Pattern: Audit processed items → Verify integrity → Create repair jobs for failures
+   - Use case: Ensure all processed ad groups actually have expected SINGLES_DAY ads
+   - Implementation: Query SD_DONE groups, check for SINGLES_DAY in headlines, create jobs for missing
+4. **State Persistence** - PostgreSQL tracks job and item status for resume capability
+5. **Background Tasks** - FastAPI BackgroundTasks for long-running jobs
+6. **Error Handling** - Distinguish between failed, skipped, and successful items
 
 ### API Integration
 1. **Configurable Batch Size** - User-adjustable (1000-10000, default: 5000) for rate limiting or performance
@@ -115,10 +130,14 @@ _Technical reference for the project. Update when: architecture changes, new pat
 ```
 theme_ads/
 ├── backend/
-│   ├── main.py                     # API endpoints
-│   ├── thema_ads_service.py        # Business logic
+│   ├── main.py                     # API endpoints (upload, discover, checkup)
+│   ├── thema_ads_service.py        # Business logic (includes checkup_ad_groups)
 │   ├── database.py                 # DB connection
 │   └── thema_ads_schema.sql        # DB schema
+├── frontend/
+│   ├── thema-ads.html              # Web UI (3 tabs: CSV Upload, Auto-Discover, Check-up)
+│   └── js/
+│       └── thema-ads.js            # Frontend logic (includes runCheckup function)
 ├── thema_ads_optimized/
 │   ├── account ids                 # Whitelist of active customer IDs (28 accounts, excludes 16 CANCELED)
 │   ├── main_optimized.py           # CLI entry point
@@ -142,4 +161,4 @@ theme_ads/
 ```
 
 ---
-_Last updated: 2025-10-03_
+_Last updated: 2025-10-07_

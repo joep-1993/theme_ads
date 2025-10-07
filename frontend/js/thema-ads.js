@@ -313,3 +313,75 @@ async function resumeJob() {
     if (!currentJobId) return;
     await resumeJobById(currentJobId);
 }
+
+async function runCheckup() {
+    const limit = document.getElementById('checkupLimit').value;
+    const batchSize = document.getElementById('checkupBatchSize').value;
+    const jobChunkSize = document.getElementById('checkupJobChunkSize').value;
+    const resultDiv = document.getElementById('checkupResult');
+    const btn = document.getElementById('checkupBtn');
+
+    btn.disabled = true;
+    resultDiv.innerHTML = '<div class="alert alert-info">Running check-up...</div>';
+
+    try {
+        const params = new URLSearchParams();
+        if (limit) params.append('limit', limit);
+        params.append('batch_size', batchSize);
+        params.append('job_chunk_size', jobChunkSize);
+
+        const response = await fetch(`/api/thema-ads/checkup?${params}`, {
+            method: 'POST'
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            const stats = data.stats;
+            const repairJobsList = data.repair_job_ids && data.repair_job_ids.length > 0
+                ? data.repair_job_ids.join(', ')
+                : 'None';
+
+            resultDiv.innerHTML = `
+                <div class="alert alert-success">
+                    <strong>Check-up completed!</strong><br>
+                    <hr>
+                    <div class="row text-center">
+                        <div class="col-md-3">
+                            <strong>Customers Processed</strong><br>
+                            <span class="badge bg-primary fs-6">${stats.customers_processed}</span>
+                        </div>
+                        <div class="col-md-3">
+                            <strong>Ad Groups Checked</strong><br>
+                            <span class="badge bg-info fs-6">${stats.ad_groups_checked}</span>
+                        </div>
+                        <div class="col-md-3">
+                            <strong>Verified (OK)</strong><br>
+                            <span class="badge bg-success fs-6">${stats.ad_groups_verified}</span>
+                        </div>
+                        <div class="col-md-3">
+                            <strong>Missing Ads</strong><br>
+                            <span class="badge bg-warning fs-6">${stats.ad_groups_missing_singles_day}</span>
+                        </div>
+                    </div>
+                    <hr>
+                    <strong>SD_CHECKED labels applied:</strong> ${stats.sd_checked_labels_applied}<br>
+                    <strong>Repair jobs created:</strong> ${stats.repair_jobs_created}
+                    ${data.repair_job_ids && data.repair_job_ids.length > 0 ? '<br><strong>Repair Job IDs:</strong> ' + repairJobsList : ''}
+                </div>
+            `;
+
+            // Start polling for first repair job if any were created
+            if (data.repair_job_ids && data.repair_job_ids.length > 0) {
+                currentJobId = data.repair_job_ids[0];
+                startPolling(data.repair_job_ids[0]);
+            }
+        } else {
+            resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.detail}</div>`;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
+    } finally {
+        btn.disabled = false;
+    }
+}

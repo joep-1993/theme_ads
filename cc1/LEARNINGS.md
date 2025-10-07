@@ -82,6 +82,42 @@ beslist_customers = [{'id': cid} for cid in customer_ids]
 - **File Format**: One customer ID per line (e.g., `4056770576`)
 - **Maintenance**: Update file when accounts are added/removed from MCC
 
+### Google Ads API Query CONTAINS ALL with OR Conditions
+- **Error**: `Error in WHERE clause: invalid field name '('` when using CONTAINS ALL with OR conditions
+- **Cause**: Google Ads Query Language doesn't support complex boolean expressions with CONTAINS ALL operator
+- **Example of Invalid Query**:
+```sql
+-- ❌ This fails
+SELECT ad_group_ad.ad_group
+FROM ad_group_ad
+WHERE ad_group_ad.ad.responsive_search_ad.headlines CONTAINS ALL {text:"SINGLES DAY"}
+   OR ad_group_ad.ad.responsive_search_ad.headlines CONTAINS ALL {text:"Singles Day"}
+```
+- **Solution**: Fetch all ads and filter in Python using string matching
+```python
+# ✅ Query all ads without complex filtering
+query = """
+    SELECT
+        ad_group_ad.ad_group,
+        ad_group.id,
+        ad_group_ad.ad.responsive_search_ad.headlines
+    FROM ad_group_ad
+    WHERE ad_group.id IN ({ad_group_ids})
+    AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+    AND ad_group_ad.status != REMOVED
+"""
+
+# Filter in Python (more flexible)
+ad_response = ga_service.search(customer_id=customer_id, query=query)
+for row in ad_response:
+    has_singles = False
+    for headline in row.ad_group_ad.ad.responsive_search_ad.headlines:
+        if 'SINGLES' in headline.text.upper():  # Case-insensitive
+            has_singles = True
+            break
+```
+- **Benefit**: More flexible filtering, avoids GAQL syntax limitations, case-insensitive matching
+
 ### Google Ads API Version Compatibility
 - **Error**: `501 GRPC target method can't be resolved`
 - **Cause**: Using outdated Google Ads API version (v16)
@@ -96,6 +132,29 @@ beslist_customers = [{'id': cid} for cid in customer_ids]
 - **Error**: `mutate_ad_group_ads() got an unexpected keyword argument 'partial_failure'`
 - **Cause**: Google Ads API v28+ removed 'partial_failure' parameter
 - **Solution**: Remove partial_failure parameter from all mutate operations
+
+### Google Ads Label Creation - Description Field Not Supported
+- **Error**: `Unknown field for Label: description` when creating labels
+- **Cause**: Google Ads API v28+ doesn't support the `description` field on Label objects
+- **Solution**: Remove description field from label creation operations
+```python
+# ❌ FAILS: Label with description
+label_operation = client.get_type("LabelOperation")
+label = label_operation.create
+label.name = "SD_CHECKED"
+label.description = "Ad group verified by checkup"  # ← Not supported
+
+# ✅ WORKS: Label without description
+label_operation = client.get_type("LabelOperation")
+label = label_operation.create
+label.name = "SD_CHECKED"  # Only name field
+
+response = label_service.mutate_labels(
+    customer_id=customer_id,
+    operations=[label_operation]
+)
+```
+- **Impact**: Labels created without descriptions; use clear label names instead
 
 ### Empty List Conditional Bug
 - **Error**: Operations silently skipped even though data exists
@@ -758,6 +817,38 @@ PerformanceConfig(
 - **Trade-off**: Slower processing but much higher success rate on large jobs
 - **Use Case**: Jobs with 100k+ ad groups that previously hit 503 errors repeatedly
 
+### Python-Based Filtering for Complex Ad Headline Searches
+- **Pattern**: Fetch all ads with basic query, filter complex conditions in Python
+- **Use Case**: Searching for specific text in RSA headlines (e.g., "SINGLES DAY", case-insensitive)
+- **Benefit**: Avoids GAQL syntax limitations, more flexible filtering, case-insensitive matching
+- **Implementation**:
+```python
+# Step 1: Query all ads without complex filtering
+query = """
+    SELECT
+        ad_group_ad.ad_group,
+        ad_group.id,
+        ad_group_ad.ad.responsive_search_ad.headlines
+    FROM ad_group_ad
+    WHERE ad_group.id IN ({ids})
+    AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+    AND ad_group_ad.status != REMOVED
+"""
+
+# Step 2: Filter in Python (flexible string matching)
+ad_groups_with_keyword = set()
+ad_response = ga_service.search(customer_id=customer_id, query=query)
+
+for row in ad_response:
+    # Check all headlines for keyword
+    for headline in row.ad_group_ad.ad.responsive_search_ad.headlines:
+        if 'SINGLES' in headline.text.upper():  # Case-insensitive
+            ad_groups_with_keyword.add(str(row.ad_group.id))
+            break  # Found in this ad, move to next ad
+```
+- **Why Not GAQL**: `CONTAINS ALL` doesn't support OR conditions or case-insensitive matching
+- **Performance**: Still efficient for thousands of ads (single query + in-memory filtering)
+
 ### Discovery Optimization: Direct Ad Query vs Nested Queries
 - **Problem**: Discovery was slow for large accounts (146k ad groups took ~271 API queries)
 - **Old Approach**: Nested queries (customers → campaigns → ad groups → label checks)
@@ -796,4 +887,4 @@ for customer in customers:
   - **Customer-grouped label checks**: Still batch-check SD_DONE labels per customer for efficiency
 
 ---
-_Last updated: 2025-10-03_
+_Last updated: 2025-10-07_

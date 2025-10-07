@@ -480,6 +480,335 @@ class ThemaAdsService:
             cur.close()
             conn.close()
 
+    async def checkup_ad_groups(
+        self,
+        client,
+        customer_ids: List[str],
+        limit: Optional[int] = None,
+        batch_size: int = 5000,
+        job_chunk_size: int = 50000,
+        background_tasks=None
+    ) -> Dict:
+        """
+        Check ad groups with SD_DONE label to verify SINGLES_DAY ads exist.
+        Creates repair jobs for ad groups missing SINGLES_DAY ads.
+
+        Args:
+            client: Google Ads API client
+            customer_ids: List of customer IDs to check
+            limit: Optional limit on number of ad groups to check
+            batch_size: Batch size for API queries
+            job_chunk_size: Maximum items per repair job
+            background_tasks: FastAPI background tasks
+
+        Returns:
+            Dict with checkup results and created job IDs
+        """
+        logger.info(f"Starting checkup: limit={limit}, batch_size={batch_size}")
+
+        ga_service = client.get_service("GoogleAdsService")
+        label_service = client.get_service("LabelService")
+
+        stats = {
+            'customers_processed': 0,
+            'ad_groups_checked': 0,
+            'ad_groups_verified': 0,
+            'ad_groups_missing_singles_day': 0,
+            'sd_checked_labels_applied': 0,
+            'repair_jobs_created': 0
+        }
+
+        repair_items = []  # Ad groups needing repair
+
+        # Process each customer
+        for customer_id in customer_ids:
+            # Check if we've reached the limit
+            if limit and stats['ad_groups_checked'] >= limit:
+                logger.info(f"Reached limit of {limit} ad groups checked")
+                break
+
+            try:
+                logger.info(f"Processing customer {customer_id}")
+                stats['customers_processed'] += 1
+
+                # Get SD_DONE label resource
+                sd_done_query = """
+                    SELECT label.resource_name, label.id
+                    FROM label
+                    WHERE label.name = 'SD_DONE'
+                    LIMIT 1
+                """
+                sd_done_resource = None
+                try:
+                    sd_label_response = ga_service.search(customer_id=customer_id, query=sd_done_query)
+                    for row in sd_label_response:
+                        sd_done_resource = row.label.resource_name
+                        break
+                except Exception as e:
+                    logger.warning(f"Customer {customer_id}: Could not find SD_DONE label: {e}")
+                    continue
+
+                if not sd_done_resource:
+                    logger.info(f"Customer {customer_id}: No SD_DONE label found, skipping")
+                    continue
+
+                # Get SD_CHECKED label resource (or create it)
+                sd_checked_query = """
+                    SELECT label.resource_name, label.id
+                    FROM label
+                    WHERE label.name = 'SD_CHECKED'
+                    LIMIT 1
+                """
+                sd_checked_resource = None
+                try:
+                    sd_checked_response = ga_service.search(customer_id=customer_id, query=sd_checked_query)
+                    for row in sd_checked_response:
+                        sd_checked_resource = row.label.resource_name
+                        break
+                except Exception:
+                    pass
+
+                # Create SD_CHECKED label if it doesn't exist
+                if not sd_checked_resource:
+                    try:
+                        label_operation = client.get_type("LabelOperation")
+                        label = label_operation.create
+                        label.name = "SD_CHECKED"
+
+                        response = label_service.mutate_labels(
+                            customer_id=customer_id,
+                            operations=[label_operation]
+                        )
+                        sd_checked_resource = response.results[0].resource_name
+                        logger.info(f"Customer {customer_id}: Created SD_CHECKED label")
+                    except Exception as e:
+                        logger.error(f"Customer {customer_id}: Could not create SD_CHECKED label: {e}")
+                        continue
+
+                # Query ad groups WITH SD_DONE label but WITHOUT SD_CHECKED label
+                ad_groups_query = """
+                    SELECT
+                        ad_group.id,
+                        ad_group.name,
+                        ad_group.resource_name,
+                        campaign.id,
+                        campaign.name
+                    FROM ad_group
+                    WHERE campaign.name LIKE 'HS/%'
+                    AND ad_group.status = 'ENABLED'
+                    AND campaign.status = 'ENABLED'
+                """
+
+                # Get all ad groups in HS/ campaigns
+                all_ad_groups = []
+                try:
+                    ag_response = ga_service.search(customer_id=customer_id, query=ad_groups_query)
+                    for row in ag_response:
+                        all_ad_groups.append({
+                            'ad_group_id': str(row.ad_group.id),
+                            'ad_group_name': row.ad_group.name,
+                            'ad_group_resource': row.ad_group.resource_name,
+                            'campaign_id': str(row.campaign.id),
+                            'campaign_name': row.campaign.name
+                        })
+                except Exception as e:
+                    logger.warning(f"Customer {customer_id}: Error querying ad groups: {e}")
+                    continue
+
+                if not all_ad_groups:
+                    logger.info(f"Customer {customer_id}: No ad groups found")
+                    continue
+
+                logger.info(f"Customer {customer_id}: Found {len(all_ad_groups)} ad groups")
+
+                # Get ad groups WITH SD_DONE label (in batches)
+                ad_groups_with_sd_done = set()
+                ad_group_resources = [ag['ad_group_resource'] for ag in all_ad_groups]
+
+                for i in range(0, len(ad_group_resources), batch_size):
+                    batch = ad_group_resources[i:i + batch_size]
+                    resources_str = ", ".join(f"'{r}'" for r in batch)
+
+                    label_check_query = f"""
+                        SELECT ad_group_label.ad_group
+                        FROM ad_group_label
+                        WHERE ad_group_label.ad_group IN ({resources_str})
+                        AND ad_group_label.label = '{sd_done_resource}'
+                    """
+
+                    try:
+                        label_response = ga_service.search(customer_id=customer_id, query=label_check_query)
+                        for row in label_response:
+                            ad_groups_with_sd_done.add(row.ad_group_label.ad_group)
+                    except Exception as e:
+                        logger.warning(f"Customer {customer_id}: Error checking SD_DONE labels: {e}")
+
+                # Get ad groups WITH SD_CHECKED label (in batches)
+                ad_groups_with_sd_checked = set()
+
+                for i in range(0, len(ad_group_resources), batch_size):
+                    batch = ad_group_resources[i:i + batch_size]
+                    resources_str = ", ".join(f"'{r}'" for r in batch)
+
+                    label_check_query = f"""
+                        SELECT ad_group_label.ad_group
+                        FROM ad_group_label
+                        WHERE ad_group_label.ad_group IN ({resources_str})
+                        AND ad_group_label.label = '{sd_checked_resource}'
+                    """
+
+                    try:
+                        label_response = ga_service.search(customer_id=customer_id, query=label_check_query)
+                        for row in label_response:
+                            ad_groups_with_sd_checked.add(row.ad_group_label.ad_group)
+                    except Exception as e:
+                        logger.warning(f"Customer {customer_id}: Error checking SD_CHECKED labels: {e}")
+
+                # Filter to ad groups WITH SD_DONE but WITHOUT SD_CHECKED
+                unchecked_ad_groups = [
+                    ag for ag in all_ad_groups
+                    if ag['ad_group_resource'] in ad_groups_with_sd_done
+                    and ag['ad_group_resource'] not in ad_groups_with_sd_checked
+                ]
+
+                logger.info(f"Customer {customer_id}: {len(unchecked_ad_groups)} ad groups need checking")
+
+                # Check each ad group for SINGLES_DAY ads
+                ad_groups_to_check = []
+                ad_groups_to_label = []
+
+                for ag in unchecked_ad_groups:
+                    # Check if we've reached the limit
+                    if limit and stats['ad_groups_checked'] >= limit:
+                        logger.info(f"Reached limit of {limit} ad groups checked")
+                        break
+
+                    ad_groups_to_check.append(ag)
+
+                # Batch check for SINGLES_DAY ads
+                if ad_groups_to_check:
+                    for i in range(0, len(ad_groups_to_check), batch_size):
+                        batch = ad_groups_to_check[i:i + batch_size]
+                        ag_ids = [ag['ad_group_id'] for ag in batch]
+                        ag_ids_str = ", ".join(ag_ids)
+
+                        # Query for all ads in these ad groups, then filter in Python
+                        all_ads_query = f"""
+                            SELECT
+                                ad_group_ad.ad_group,
+                                ad_group.id,
+                                ad_group_ad.ad.responsive_search_ad.headlines
+                            FROM ad_group_ad
+                            WHERE ad_group.id IN ({ag_ids_str})
+                            AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+                            AND ad_group_ad.status != REMOVED
+                        """
+
+                        ad_groups_with_singles_day = set()
+                        try:
+                            ad_response = ga_service.search(customer_id=customer_id, query=all_ads_query)
+                            for row in ad_response:
+                                # Check if any headline contains "SINGLES" (case-insensitive)
+                                has_singles = False
+                                for headline in row.ad_group_ad.ad.responsive_search_ad.headlines:
+                                    if 'SINGLES' in headline.text.upper():
+                                        has_singles = True
+                                        break
+
+                                if has_singles:
+                                    ad_groups_with_singles_day.add(str(row.ad_group.id))
+                        except Exception as e:
+                            logger.warning(f"Customer {customer_id}: Error checking SINGLES_DAY ads: {e}")
+
+                        # Process batch results
+                        for ag in batch:
+                            stats['ad_groups_checked'] += 1
+
+                            if ag['ad_group_id'] in ad_groups_with_singles_day:
+                                # Has SINGLES_DAY ad - mark as verified
+                                stats['ad_groups_verified'] += 1
+                                ad_groups_to_label.append(ag)
+                            else:
+                                # Missing SINGLES_DAY ad - needs repair
+                                stats['ad_groups_missing_singles_day'] += 1
+                                repair_items.append({
+                                    'customer_id': customer_id,
+                                    'campaign_id': ag['campaign_id'],
+                                    'campaign_name': ag['campaign_name'],
+                                    'ad_group_id': ag['ad_group_id'],
+                                    'ad_group_name': ag['ad_group_name']
+                                })
+
+                            # Check limit after each ad group
+                            if limit and stats['ad_groups_checked'] >= limit:
+                                break
+
+                # Apply SD_CHECKED label to verified ad groups (in batches)
+                if ad_groups_to_label:
+                    ad_group_label_service = client.get_service("AdGroupLabelService")
+
+                    for i in range(0, len(ad_groups_to_label), batch_size):
+                        batch = ad_groups_to_label[i:i + batch_size]
+
+                        operations = []
+                        for ag in batch:
+                            operation = client.get_type("AdGroupLabelOperation")
+                            ag_label = operation.create
+                            ag_label.ad_group = ag['ad_group_resource']
+                            ag_label.label = sd_checked_resource
+                            operations.append(operation)
+
+                        try:
+                            response = ad_group_label_service.mutate_ad_group_labels(
+                                customer_id=customer_id,
+                                operations=operations
+                            )
+                            stats['sd_checked_labels_applied'] += len(response.results)
+                            logger.info(f"Customer {customer_id}: Applied SD_CHECKED label to {len(response.results)} ad groups")
+                        except Exception as e:
+                            logger.error(f"Customer {customer_id}: Error applying SD_CHECKED labels: {e}")
+
+                logger.info(f"Customer {customer_id}: Completed - checked {stats['ad_groups_checked']} ad groups")
+
+            except Exception as e:
+                logger.error(f"Customer {customer_id}: Unexpected error: {e}", exc_info=True)
+                continue
+
+            # Check if we've reached the limit
+            if limit and stats['ad_groups_checked'] >= limit:
+                break
+
+        # Create repair jobs if needed
+        job_ids = []
+        if repair_items:
+            logger.info(f"Creating repair jobs for {len(repair_items)} ad groups")
+
+            # Split into jobs based on job_chunk_size
+            num_chunks = (len(repair_items) + job_chunk_size - 1) // job_chunk_size
+
+            for chunk_idx in range(num_chunks):
+                start_idx = chunk_idx * job_chunk_size
+                end_idx = min(start_idx + job_chunk_size, len(repair_items))
+                chunk_data = repair_items[start_idx:end_idx]
+
+                # Create repair job
+                job_id = self.create_job(chunk_data, batch_size=batch_size)
+                job_ids.append(job_id)
+                stats['repair_jobs_created'] += 1
+                logger.info(f"Created repair job {job_id} with {len(chunk_data)} items")
+
+                # Automatically start the job
+                if background_tasks:
+                    background_tasks.add_task(self.process_job, job_id)
+
+        logger.info(f"Checkup completed: {stats}")
+
+        return {
+            'status': 'completed',
+            'stats': stats,
+            'repair_job_ids': job_ids
+        }
+
 
 # Global service instance
 thema_ads_service = ThemaAdsService()
