@@ -295,6 +295,327 @@ async def discover_ad_groups(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/thema-ads/checkup")
+async def checkup_ad_groups(
+    background_tasks: BackgroundTasks = None,
+    limit: int = None,
+    batch_size: int = 5000,
+    job_chunk_size: int = 50000
+):
+    """
+    Check-up function: Find ad groups WITH SD_DONE label but WITHOUT SINGLES_DAY label on ads.
+    Attempts to create the missing SINGLES_DAY ad for these ad groups.
+
+    Args:
+        limit: Optional limit on number of ad groups to check
+        batch_size: Batch size for API queries (default: 5000)
+        job_chunk_size: Maximum items per job (splits large discoveries into multiple jobs, default: 50000)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"Check-up parameters: limit={limit}, batch_size={batch_size}, job_chunk_size={job_chunk_size}")
+
+    try:
+        from pathlib import Path
+        from dotenv import load_dotenv
+
+        # Load environment variables
+        env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+        else:
+            raise HTTPException(status_code=500, detail="Google Ads credentials not configured")
+
+        from config import load_config_from_env
+        from google_ads_client import initialize_client
+
+        config = load_config_from_env()
+        client = initialize_client(config.google_ads)
+
+        # Load customer IDs from file
+        account_ids_file = Path(__file__).parent.parent / "thema_ads_optimized" / "account ids"
+        if not account_ids_file.exists():
+            raise HTTPException(status_code=500, detail="Account IDs file not found")
+
+        with open(account_ids_file, 'r') as f:
+            customer_ids = [line.strip() for line in f if line.strip()]
+
+        logger.info(f"Loaded {len(customer_ids)} customer IDs from account ids file")
+
+        # Get all customer accounts
+        ga_service = client.get_service("GoogleAdsService")
+
+        # Build customer list with IDs from file
+        beslist_customers = [{'id': cid} for cid in customer_ids]
+
+        logger.info(f"Using {len(beslist_customers)} customer accounts for check-up")
+
+        # Query ad groups with SD_DONE label
+        input_data = []
+        ad_group_map = {}
+        total_checked = 0  # Track total ad groups checked for limit
+
+        for customer in beslist_customers:
+            customer_id = customer['id']
+            logger.info(f"Check-up: Processing customer {customer_id}")
+
+            # Stop if we've already found enough ad groups needing repair
+            if limit and len(input_data) >= limit:
+                logger.info(f"Reached limit of {limit} ad groups needing repair, stopping customer processing")
+                break
+
+            try:
+                # Get SD_DONE label resource
+                sd_done_query = """
+                    SELECT label.resource_name
+                    FROM label
+                    WHERE label.name = 'SD_DONE'
+                    LIMIT 1
+                """
+                sd_label_response = ga_service.search(customer_id=customer_id, query=sd_done_query)
+                sd_done_resource = None
+                for row in sd_label_response:
+                    sd_done_resource = row.label.resource_name
+                    break
+
+                if not sd_done_resource:
+                    logger.info(f"  No SD_DONE label found for customer {customer_id}")
+                    continue
+
+                # Get SD_CHECKED label resource
+                sd_checked_query = """
+                    SELECT label.resource_name
+                    FROM label
+                    WHERE label.name = 'SD_CHECKED'
+                    LIMIT 1
+                """
+                sd_checked_response = ga_service.search(customer_id=customer_id, query=sd_checked_query)
+                sd_checked_resource = None
+                for row in sd_checked_response:
+                    sd_checked_resource = row.label.resource_name
+                    break
+
+                # Get ad groups that already have SD_CHECKED label (to skip them)
+                ag_with_sd_checked = set()
+                if sd_checked_resource:
+                    sd_checked_check_query = f"""
+                        SELECT ad_group_label.ad_group
+                        FROM ad_group_label
+                        WHERE ad_group_label.label = '{sd_checked_resource}'
+                        AND campaign.name LIKE 'HS/%'
+                    """
+                    try:
+                        checked_response = ga_service.search(customer_id=customer_id, query=sd_checked_check_query)
+                        for row in checked_response:
+                            ag_with_sd_checked.add(row.ad_group_label.ad_group)
+                        logger.info(f"  Found {len(ag_with_sd_checked)} ad groups already checked (SD_CHECKED label)")
+                    except:
+                        pass
+
+                # Get ad groups WITH SD_DONE label in HS/ campaigns
+                ag_with_sd_done_query = f"""
+                    SELECT
+                        ad_group_label.ad_group,
+                        ad_group.id,
+                        ad_group.name,
+                        campaign.id,
+                        campaign.name
+                    FROM ad_group_label
+                    WHERE ad_group_label.label = '{sd_done_resource}'
+                    AND campaign.name LIKE 'HS/%'
+                    AND ad_group.status = 'ENABLED'
+                    AND campaign.status = 'ENABLED'
+                """
+
+                ag_response = ga_service.search(customer_id=customer_id, query=ag_with_sd_done_query)
+
+                # Store ad groups with SD_DONE label (excluding those with SD_CHECKED)
+                customer_ad_groups = []
+                for row in ag_response:
+                    ag_resource = row.ad_group_label.ad_group
+                    ad_group_id = str(row.ad_group.id)
+
+                    # Skip if already has SD_CHECKED label
+                    if ag_resource in ag_with_sd_checked:
+                        continue
+
+                    if ag_resource not in ad_group_map:
+                        ad_group_map[ag_resource] = {
+                            'customer_id': customer_id,
+                            'campaign_id': str(row.campaign.id),
+                            'campaign_name': row.campaign.name,
+                            'ad_group_id': ad_group_id,
+                            'ad_group_resource': ag_resource
+                        }
+                        customer_ad_groups.append(ad_group_id)
+
+                logger.info(f"  Found {len(customer_ad_groups)} ad groups with SD_DONE label (not yet checked)")
+
+                if not customer_ad_groups:
+                    continue
+
+                # Now check which of these ad groups have ads with SINGLES_DAY label
+                # Get SINGLES_DAY label resource
+                singles_day_query = """
+                    SELECT label.resource_name
+                    FROM label
+                    WHERE label.name = 'SINGLES_DAY'
+                    LIMIT 1
+                """
+                singles_label_response = ga_service.search(customer_id=customer_id, query=singles_day_query)
+                singles_day_resource = None
+                for row in singles_label_response:
+                    singles_day_resource = row.label.resource_name
+                    break
+
+                ag_with_singles_day = set()
+
+                if singles_day_resource:
+                    # Batch check for ads with SINGLES_DAY label in chunks
+                    for i in range(0, len(customer_ad_groups), batch_size):
+                        batch = customer_ad_groups[i:i + batch_size]
+                        ag_ids_str = ", ".join(batch)
+
+                        # Check for ads with SINGLES_DAY label
+                        singles_day_check_query = f"""
+                            SELECT ad_group_ad.ad_group
+                            FROM ad_group_ad
+                            WHERE ad_group.id IN ({ag_ids_str})
+                            AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+                            AND ad_group_ad.status != REMOVED
+                        """
+
+                        # Get all ads and check their labels
+                        ads_response = ga_service.search(customer_id=customer_id, query=singles_day_check_query)
+
+                        # For each ad, check if it has SINGLES_DAY label
+                        for ad_row in ads_response:
+                            ad_resource = ad_row.ad_group_ad.ad_group
+
+                            # Query labels for this specific ad
+                            ad_id = ad_row.ad_group_ad.ad_group.split('/')[-1]
+                            ad_label_query = f"""
+                                SELECT ad_group_ad_label.ad_group_ad
+                                FROM ad_group_ad_label
+                                WHERE ad_group_ad_label.label = '{singles_day_resource}'
+                                AND ad_group.id = {ad_id}
+                            """
+
+                            try:
+                                label_response = ga_service.search(customer_id=customer_id, query=ad_label_query)
+                                for _ in label_response:
+                                    ag_with_singles_day.add(ad_resource)
+                                    break
+                            except:
+                                pass
+
+                logger.info(f"  Found {len(ag_with_singles_day)} ad groups with SINGLES_DAY label")
+
+                # Apply SD_CHECKED label to ad groups that have SINGLES_DAY ads
+                if sd_checked_resource and len(ag_with_singles_day) > 0:
+                    try:
+                        # Create label operations for ad groups with SINGLES_DAY
+                        ad_group_label_service = client.get_service("AdGroupLabelService")
+                        operations = []
+
+                        for ag_resource in ag_with_singles_day:
+                            # Check if this ad group is in our current batch
+                            ag_data = ad_group_map.get(ag_resource)
+                            if ag_data and ag_data['customer_id'] == customer_id:
+                                operation = client.get_type("AdGroupLabelOperation")
+                                ad_group_label = operation.create
+                                ad_group_label.ad_group = ag_resource
+                                ad_group_label.label = sd_checked_resource
+                                operations.append(operation)
+
+                        if operations:
+                            # Apply labels in batches
+                            batch_size_label = 5000
+                            for i in range(0, len(operations), batch_size_label):
+                                batch_ops = operations[i:i + batch_size_label]
+                                try:
+                                    ad_group_label_service.mutate_ad_group_labels(
+                                        customer_id=customer_id,
+                                        operations=batch_ops
+                                    )
+                                    logger.info(f"  Applied SD_CHECKED label to {len(batch_ops)} ad groups")
+                                except Exception as label_error:
+                                    logger.warning(f"  Error applying SD_CHECKED labels (batch {i//batch_size_label}): {label_error}")
+                    except Exception as e:
+                        logger.warning(f"  Could not apply SD_CHECKED labels: {e}")
+
+                # Add ad groups that have SD_DONE but NOT SINGLES_DAY
+                for ag_resource, ag_data in ad_group_map.items():
+                    if ag_data['customer_id'] == customer_id and ag_resource not in ag_with_singles_day:
+                        input_data.append({
+                            'customer_id': ag_data['customer_id'],
+                            'campaign_id': ag_data['campaign_id'],
+                            'campaign_name': ag_data['campaign_name'],
+                            'ad_group_id': ag_data['ad_group_id']
+                        })
+
+                        # Check limit - stop adding to this customer's results
+                        if limit and len(input_data) >= limit:
+                            logger.info(f"Reached limit of {limit} ad groups for customer {customer_id}")
+                            break
+
+            except Exception as e:
+                logger.warning(f"Check-up error for customer {customer_id}: {e}")
+                continue
+
+        logger.info(f"Check-up found {len(input_data)} ad groups needing SINGLES_DAY ads")
+
+        if not input_data:
+            return {
+                "status": "no_ad_groups_found",
+                "message": "All ad groups with SD_DONE label already have SINGLES_DAY ads",
+                "total_items": 0,
+                "customers_checked": len(beslist_customers)
+            }
+
+        # Split into multiple jobs if needed
+        from backend.thema_ads_service import thema_ads_service
+        job_ids = []
+        total_items = len(input_data)
+
+        # Calculate number of chunks needed
+        num_chunks = (total_items + job_chunk_size - 1) // job_chunk_size
+
+        if num_chunks > 1:
+            logger.info(f"Splitting {total_items} ad groups into {num_chunks} jobs of max {job_chunk_size} items each")
+
+        for chunk_idx in range(num_chunks):
+            start_idx = chunk_idx * job_chunk_size
+            end_idx = min(start_idx + job_chunk_size, total_items)
+            chunk_data = input_data[start_idx:end_idx]
+
+            # Create job for this chunk
+            job_id = thema_ads_service.create_job(chunk_data, batch_size=batch_size)
+            job_ids.append(job_id)
+            logger.info(f"Created check-up job {job_id} with {len(chunk_data)} items (chunk {chunk_idx + 1}/{num_chunks})")
+
+            # Automatically start the job
+            if background_tasks:
+                background_tasks.add_task(thema_ads_service.process_job, job_id)
+
+        return {
+            "job_ids": job_ids,
+            "total_items": total_items,
+            "jobs_created": len(job_ids),
+            "items_per_job": job_chunk_size,
+            "status": "processing",
+            "customers_checked": len(beslist_customers),
+            "ad_groups_needing_repair": total_items
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Check-up failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/thema-ads/upload")
 async def upload_csv(
     file: UploadFile = File(...),
