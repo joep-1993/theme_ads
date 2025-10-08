@@ -10,6 +10,7 @@ _Tasks currently being worked on_
 ## Completed
 _Finished tasks (move here when done)_
 
+- [x] Fix repair job SD_DONE skip logic (added is_repair_job flag to jobs table, updated get_job_status to return flag, modified processor to skip SD_DONE check for repair jobs) #claude-session:2025-10-08
 - [x] Re-implement Check-up function with proper testing (audits ad groups with SD_DONE label, verifies SINGLES_DAY ads exist, creates repair jobs for missing ads; includes backend endpoint, frontend UI tab, tested with limit=10) #claude-session:2025-10-07
 - [x] Reduce ad creation batch size to prevent Google crawler rate limiting (100 ads per batch, 5s delays, prevents DESTINATION_NOT_WORKING errors from CloudFront blocking) #claude-session:2025-10-05
 - [x] Reduce API operations by disabling non-essential labels (removed THEMA_AD and BF_2025 labels, reduced from 6 to 4 operations per ad group, 33% savings) #claude-session:2025-10-05

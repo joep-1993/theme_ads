@@ -54,18 +54,18 @@ class ThemaAdsService:
             logger.error(f"Failed to fetch campaign info: {e}")
             raise
 
-    def create_job(self, input_data: List[Dict], batch_size: int = 7500) -> int:
+    def create_job(self, input_data: List[Dict], batch_size: int = 7500, is_repair_job: bool = False) -> int:
         """Create a new processing job and store input data using batch inserts."""
         conn = get_db_connection()
         cur = conn.cursor()
 
         try:
-            # Create job with batch_size
+            # Create job with batch_size and repair flag
             cur.execute("""
-                INSERT INTO thema_ads_jobs (status, total_ad_groups, batch_size)
-                VALUES ('pending', %s, %s)
+                INSERT INTO thema_ads_jobs (status, total_ad_groups, batch_size, is_repair_job)
+                VALUES ('pending', %s, %s, %s)
                 RETURNING id
-            """, (len(input_data), batch_size))
+            """, (len(input_data), batch_size, is_repair_job))
 
             job_id = cur.fetchone()['id']
 
@@ -156,6 +156,7 @@ class ThemaAdsService:
                 'updated_at': job_dict.get('updated_at'),
                 'error_message': job_dict.get('error_message'),
                 'batch_size': job_dict.get('batch_size', 7500),
+                'is_repair_job': job_dict.get('is_repair_job', False),
                 'items_by_status': items_by_status,
                 'recent_failures': recent_failures
             }
@@ -278,10 +279,11 @@ class ThemaAdsService:
             # Load config
             config = load_config_from_env()
 
-            # Get job details including batch_size
+            # Get job details including batch_size and repair flag
             job_details = self.get_job_status(job_id)
             batch_size = job_details.get('batch_size', 7500)
-            logger.info(f"Job {job_id} will use batch_size: {batch_size}")
+            is_repair_job = job_details.get('is_repair_job', False)
+            logger.info(f"Job {job_id} will use batch_size: {batch_size}, is_repair_job: {is_repair_job}")
 
             # Get pending items
             pending_items = self.get_pending_items(job_id)
@@ -328,7 +330,7 @@ class ThemaAdsService:
 
             # Import and initialize processor
             from main_optimized import ThemaAdsProcessor
-            processor = ThemaAdsProcessor(config, batch_size=batch_size)
+            processor = ThemaAdsProcessor(config, batch_size=batch_size, skip_sd_done_check=is_repair_job)
 
             # Process with custom callback
             results = await self._process_with_tracking(processor, inputs, job_id)
@@ -791,8 +793,8 @@ class ThemaAdsService:
                 end_idx = min(start_idx + job_chunk_size, len(repair_items))
                 chunk_data = repair_items[start_idx:end_idx]
 
-                # Create repair job
-                job_id = self.create_job(chunk_data, batch_size=batch_size)
+                # Create repair job with is_repair_job flag
+                job_id = self.create_job(chunk_data, batch_size=batch_size, is_repair_job=True)
                 job_ids.append(job_id)
                 stats['repair_jobs_created'] += 1
                 logger.info(f"Created repair job {job_id} with {len(chunk_data)} items")

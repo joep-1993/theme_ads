@@ -45,13 +45,14 @@ logger = logging.getLogger(__name__)
 class ThemaAdsProcessor:
     """High-performance processor for themed ad campaigns."""
 
-    def __init__(self, config, batch_size: int = 5000):
+    def __init__(self, config, batch_size: int = 5000, skip_sd_done_check: bool = False):
         self.config = config
         self.client = initialize_client(config.google_ads)
         self.theme = "singles_day"  # Configurable
         self.label_names = ["SINGLES_DAY", "THEMA_AD", "THEMA_ORIGINAL", "BF_2025", "SD_DONE"]
         self.batch_size = batch_size
-        logger.info(f"Initialized ThemaAdsProcessor with batch_size={batch_size}")
+        self.skip_sd_done_check = skip_sd_done_check
+        logger.info(f"Initialized ThemaAdsProcessor with batch_size={batch_size}, skip_sd_done_check={skip_sd_done_check}")
 
     async def process_all(self, inputs: List[AdGroupInput]) -> List[ProcessingResult]:
         """Process all ad groups with maximum parallelization."""
@@ -214,8 +215,8 @@ class ThemaAdsProcessor:
             failed_inputs = []  # Track inputs that failed pre-checks
 
             for inp, ag_resource in zip(inputs, ad_group_resources):
-                # Skip ad groups that already have SD_DONE label
-                if cached_data.ad_group_labels and cached_data.ad_group_labels.get(ag_resource, False):
+                # Skip ad groups that already have SD_DONE label (unless this is a repair job)
+                if not self.skip_sd_done_check and cached_data.ad_group_labels and cached_data.ad_group_labels.get(ag_resource, False):
                     logger.info(f"Skipping ad group {inp.ad_group_id} - already has SD_DONE label")
                     skipped_ags.append(inp)
                     continue

@@ -73,6 +73,10 @@ _Technical reference for the project. Update when: architecture changes, new pat
    - Pattern: Audit processed items → Verify integrity → Create repair jobs for failures
    - Use case: Ensure all processed ad groups actually have expected SINGLES_DAY ads
    - Implementation: Query SD_DONE groups, check for SINGLES_DAY in headlines, create jobs for missing
+   - Repair Job Flag: Jobs created by checkup have `is_repair_job=True` to bypass SD_DONE skip logic
+     - Database: `thema_ads_jobs.is_repair_job BOOLEAN DEFAULT FALSE`
+     - Processor: `ThemaAdsProcessor(config, skip_sd_done_check=is_repair_job)`
+     - Allows reprocessing of items that already have SD_DONE label
 4. **State Persistence** - PostgreSQL tracks job and item status for resume capability
 5. **Background Tasks** - FastAPI BackgroundTasks for long-running jobs
 6. **Error Handling** - Distinguish between failed, skipped, and successful items
@@ -133,7 +137,8 @@ theme_ads/
 │   ├── main.py                     # API endpoints (upload, discover, checkup)
 │   ├── thema_ads_service.py        # Business logic (includes checkup_ad_groups)
 │   ├── database.py                 # DB connection
-│   └── thema_ads_schema.sql        # DB schema
+│   └── thema_ads_schema.sql        # DB schema (includes is_repair_job column)
+├── delete_sd_checked_labels.py     # Utility: Delete SD_CHECKED labels from all accounts
 ├── frontend/
 │   ├── thema-ads.html              # Web UI (3 tabs: CSV Upload, Auto-Discover, Check-up)
 │   └── js/

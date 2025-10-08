@@ -133,6 +133,36 @@ for row in ad_response:
 - **Cause**: Google Ads API v28+ removed 'partial_failure' parameter
 - **Solution**: Remove partial_failure parameter from all mutate operations
 
+### Repair Jobs Skipping Items Due to Missing is_repair_job Field
+- **Error**: Repair jobs created by check-up function still skipping ad groups with SD_DONE label
+- **Root Cause**: `get_job_status()` wasn't returning `is_repair_job` field from database
+- **Impact**: Jobs marked as `is_repair_job=True` in database, but code received `False`, causing SD_DONE skip logic to activate
+- **Symptoms**: Check-up creates repair jobs with `is_repair_job=True`, but skipped CSV shows "Already processed (has SD_DONE label)"
+- **Solution**: Add `is_repair_job` to `get_job_status()` return dictionary
+```python
+# Fix in backend/thema_ads_service.py get_job_status()
+def get_job_status(self, job_id: int) -> Dict:
+    job_dict = dict(job)
+    return {
+        'id': job_dict['id'],
+        'status': job_dict['status'],
+        # ... other fields ...
+        'batch_size': job_dict.get('batch_size', 7500),
+        'is_repair_job': job_dict.get('is_repair_job', False),  # ← Add this!
+        'items_by_status': items_by_status,
+        'recent_failures': recent_failures
+    }
+
+# Processor initialization (backend/thema_ads_service.py process_job())
+is_repair_job = job_details.get('is_repair_job', False)
+processor = ThemaAdsProcessor(config, batch_size=batch_size, skip_sd_done_check=is_repair_job)
+
+# Skip logic (thema_ads_optimized/main_optimized.py)
+if not self.skip_sd_done_check and has_sd_done_label:
+    skip_item()  # Only skip if NOT a repair job
+```
+- **Debugging**: Check logs for "Initialized ThemaAdsProcessor with batch_size=X, skip_sd_done_check=False" when it should be True
+
 ### Google Ads Label Creation - Description Field Not Supported
 - **Error**: `Unknown field for Label: description` when creating labels
 - **Cause**: Google Ads API v28+ doesn't support the `description` field on Label objects
@@ -244,6 +274,35 @@ async def _resolve_ad_group_ids(customer_id, inputs):
     # Update inputs with correct IDs from Google Ads
 ```
 - **Prevention**: Always export with `ad_group_name` column; CSV must include both ID and name
+
+### Deleting Labels vs Removing Labels from Ad Groups
+- **Problem**: Removing labels from thousands of ad groups is slow (1 API call per batch of 5000 ad group labels)
+- **Inefficient Approach**: Remove ad group labels in batches → many API calls
+- **Efficient Approach**: Delete the label itself → automatic removal from all ad groups → 1 API call per customer
+```python
+# ❌ SLOW: Remove labels from ad groups individually
+for batch in ad_group_labels_batches:
+    operations = []
+    for ag_label_resource in batch:
+        operation = client.get_type("AdGroupLabelOperation")
+        operation.remove = ag_label_resource
+        operations.append(operation)
+    ad_group_label_service.mutate_ad_group_labels(
+        customer_id=customer_id,
+        operations=operations
+    )  # Many API calls (1 per 5000 ad group labels)
+
+# ✅ FAST: Delete label itself (removes from all ad groups automatically)
+label_operation = client.get_type("LabelOperation")
+label_operation.remove = label_resource_name  # e.g., "customers/123/labels/456"
+label_service.mutate_labels(
+    customer_id=customer_id,
+    operations=[label_operation]
+)  # One API call per customer
+```
+- **Use Case**: Resetting SD_CHECKED labels across 129 customer accounts with 240k+ ad groups
+- **Performance**: 1 call per customer vs thousands of calls to remove individual ad group labels
+- **Script**: `delete_sd_checked_labels.py` - finds and deletes SD_CHECKED label from each customer account
 
 ### CSV Encoding Issues
 - **Error**: `'utf-8' codec can't decode byte 0xe8 in position X: invalid continuation byte`
@@ -848,6 +907,36 @@ for row in ad_response:
 ```
 - **Why Not GAQL**: `CONTAINS ALL` doesn't support OR conditions or case-insensitive matching
 - **Performance**: Still efficient for thousands of ads (single query + in-memory filtering)
+
+### Repair Job Pattern for Quality Assurance
+- **Pattern**: Use boolean flag to bypass normal validation for repair operations
+- **Use Case**: Check-up function finds processed items missing expected results, creates repair jobs to fix them
+- **Problem**: Same processing code needs to handle both normal operations and repair operations differently
+- **Solution**: Add `is_repair_job` flag to job record, pass to processor as parameter
+- **Implementation**:
+```python
+# Database: Add is_repair_job column
+ALTER TABLE thema_ads_jobs ADD COLUMN is_repair_job BOOLEAN DEFAULT FALSE;
+
+# Service: Create repair job with flag
+job_id = create_job(items, batch_size=5000, is_repair_job=True)
+
+# Service: Pass flag to processor
+job_details = get_job_status(job_id)
+is_repair_job = job_details.get('is_repair_job', False)
+processor = ThemaAdsProcessor(config, skip_sd_done_check=is_repair_job)
+
+# Processor: Skip validation for repair jobs
+def __init__(self, config, batch_size=5000, skip_sd_done_check=False):
+    self.skip_sd_done_check = skip_sd_done_check
+
+# Processing: Conditional skip logic
+if not self.skip_sd_done_check and has_sd_done_label:
+    skip_item()  # Normal jobs skip processed items
+# Repair jobs bypass this check and reprocess items
+```
+- **Benefit**: Same codebase handles both normal processing and repairs without duplication
+- **Example**: Check-up creates repair jobs for ad groups with SD_DONE but missing SINGLES_DAY ads
 
 ### Discovery Optimization: Direct Ad Query vs Nested Queries
 - **Problem**: Discovery was slow for large accounts (146k ad groups took ~271 API queries)

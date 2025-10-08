@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS thema_ads_jobs (
     completed_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    error_message TEXT
+    error_message TEXT,
+    is_repair_job BOOLEAN DEFAULT FALSE
 );
 
 -- Job items: tracks each individual ad group being processed
