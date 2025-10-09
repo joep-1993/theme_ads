@@ -18,6 +18,43 @@ cd thema_ads_optimized/
 
 ## Common Issues & Solutions
 
+### Google Ads API Invalid Enum Value 'REMOVED'
+- **Error**: `error_code { request_error: INVALID_ENUM_VALUE } message: "Enum value 'REMOVED' cannot be used."`
+- **Cause**: Attempting to set ad status to REMOVED using update operation
+- **Impact**: Batch ad removal operations fail completely
+- **Solution**: Use remove operation instead of update with REMOVED status
+```python
+# ❌ FAILS: Setting status to REMOVED
+operation = client.get_type("AdGroupAdOperation")
+operation.update.status = client.enums.AdGroupAdStatusEnum.REMOVED  # Not allowed
+
+# ✅ WORKS: Using remove operation
+operation = client.get_type("AdGroupAdOperation")
+operation.remove = ad_resource_name  # Correct approach
+```
+- **Example**: Removing ads with SINGLES_DAY label requires remove operation, not status update
+
+### Google Ads API FILTER_HAS_TOO_MANY_VALUES for Label Removal
+- **Error**: `error_code { query_error: FILTER_HAS_TOO_MANY_VALUES } message: "The number of values (right-hand-side operands) in a filter exceeds the limit."`
+- **Cause**: Querying thousands of ad groups in single WHERE IN clause (e.g., 20,312 ad groups)
+- **Impact**: Cannot retrieve ad group labels for bulk removal operations
+- **Solution**: Batch queries into chunks of 1,000 resources per query
+```python
+# ❌ FAILS: Query all 20,312 ad groups at once
+all_resources = [f"customers/{cid}/adGroups/{ag_id}" for ag_id in ad_group_ids]
+resources_str = ", ".join(f"'{r}'" for r in all_resources)
+query = f"SELECT ad_group_label.resource_name WHERE ad_group IN ({resources_str})"
+
+# ✅ WORKS: Batch into chunks of 1,000
+BATCH_SIZE = 1000
+for i in range(0, len(ad_group_resources), BATCH_SIZE):
+    batch = ad_group_resources[i:i + BATCH_SIZE]
+    resources_str = ", ".join(f"'{r}'" for r in batch)
+    query = f"SELECT ad_group_label.resource_name WHERE ad_group IN ({resources_str})"
+    # Process batch...
+```
+- **Performance**: 20,312 ad groups → 21 batches of 1,000 each
+
 ### Google Ads API 503 Service Unavailable Errors
 - **Error**: `503 The service is currently unavailable`
 - **Cause**: Google Ads API rate limiting or temporary service unavailability when processing large volumes
@@ -398,6 +435,111 @@ git config user.email "email@example.com"
 ```
 
 ## Project Patterns
+
+### Multi-Theme System Architecture
+- **Pattern**: Support multiple seasonal/event themes with per-ad-group theme assignment
+- **Benefit**: Single upload can create ads for different themes across different ad groups; flexible theme management
+- **Implementation**:
+```python
+# 1. Theme content in structured directories
+themes/
+├── black_friday/
+│   ├── headlines.txt      # 15 theme-specific headlines
+│   └── descriptions.txt   # 4 theme-specific descriptions
+├── cyber_monday/
+├── sinterklaas/
+└── kerstmis/
+
+# 2. Theme metadata in central module (themes.py)
+SUPPORTED_THEMES = {
+    "black_friday": {
+        "label": "THEME_BF",
+        "display_name": "Black Friday",
+        "countdown_date": "2025-11-28 00:00:00"
+    },
+    # ... other themes
+}
+
+# 3. Load theme content dynamically
+def load_theme_content(theme_name: str) -> ThemeContent:
+    theme_dir = THEMES_DIR / theme_name
+    headlines = read_file(theme_dir / "headlines.txt")
+    descriptions = read_file(theme_dir / "descriptions.txt")
+    return ThemeContent(headlines, descriptions, label, display_name)
+
+# 4. Store theme per ad group in database
+thema_ads_job_items: job_id, customer_id, ad_group_id, theme_name, status
+
+# 5. Process by customer, apply theme per ad group
+for customer_id, ad_groups in grouped_by_customer:
+    for ad_group in ad_groups:
+        theme_content = load_theme_content(ad_group.theme_name)
+        create_ad(ad_group, theme_content)
+        apply_label(ad_group, get_theme_label(ad_group.theme_name))
+```
+- **Excel Upload Format**:
+```csv
+customer_id,ad_group_id,theme
+1234567890,111111111,black_friday
+1234567890,222222222,cyber_monday
+9876543210,333333333,kerstmis
+```
+- **Processing Order**: Group by customer_id (not by theme) for optimal API batching
+- **Performance**: No penalty for mixed themes - same 6-8 API calls per customer regardless
+
+### Theme-Specific Label Management
+- **Pattern**: Dynamic label creation and assignment based on theme
+- **Benefit**: Track which theme was applied to each ad; enable theme-specific reporting and filtering
+- **Implementation**:
+```python
+# 1. Get all theme labels dynamically
+theme_labels = get_all_theme_labels()  # ["THEME_BF", "THEME_CM", "THEME_SK", "THEME_KM", "THEME_SD"]
+all_labels = theme_labels + ["THEMA_AD", "THEMA_ORIGINAL", "SD_DONE"]
+
+# 2. Ensure labels exist in customer account
+labels = await ensure_labels_exist(client, customer_id, all_labels)
+
+# 3. Apply correct theme label to each new ad
+for i, ad_resource in enumerate(new_ad_resources):
+    ad_group = processed_inputs[i]
+    theme_label_name = get_theme_label(ad_group.theme_name)  # e.g., "THEME_BF"
+    label_operations.append((ad_resource, labels[theme_label_name]))
+
+# 4. Label scheme
+# - New ad: Theme-specific label (THEME_BF, THEME_CM, etc.)
+# - Old ad: THEMA_ORIGINAL (marks the original ad that was copied/paused)
+# - Ad group: SD_DONE (prevents reprocessing)
+```
+- **Use Case**: Filter Google Ads UI to show only Black Friday ads, or report on Cyber Monday performance
+
+### Processing Order Optimization - By Customer, Not By Theme
+- **Pattern**: Group all ad groups by customer_id for parallel processing, regardless of theme
+- **Anti-pattern**: Process all ads for one theme, then all ads for another theme (crosses customer boundaries)
+- **Why This Works**:
+  1. **API Efficiency**: Google Ads API operations are scoped to customer; batching by customer enables:
+     - Single prefetch per customer (all labels, all existing ads)
+     - Single batch ad creation per customer
+     - Single batch label operation per customer
+  2. **Parallelization**: Process multiple customers simultaneously (5 concurrent)
+  3. **Theme Flexibility**: Each ad group can have different theme within same customer
+- **Example**:
+```python
+# Upload contains mixed themes
+customer A: [ag1:christmas, ag2:black_friday, ag3:christmas]
+customer B: [ag4:cyber_monday, ag5:black_friday]
+
+# ✅ GOOD: Process by customer (parallel)
+Task 1: Process customer A (all 3 ad groups with their themes)
+Task 2: Process customer B (all 2 ad groups with their themes)
+# Both tasks run in parallel → 6-8 API calls per customer
+
+# ❌ BAD: Process by theme (sequential, crosses customers)
+Step 1: Process christmas (customer A ag1, customer A ag3)
+Step 2: Process black_friday (customer A ag2, customer B ag5)
+Step 3: Process cyber_monday (customer B ag4)
+# Cannot parallelize, must prefetch customer A data twice
+```
+- **Performance**: Same 6-8 API calls per customer whether all ad groups have same theme or different themes
 
 ### Async/Parallel Processing for Performance
 - **Pattern**: Use asyncio with semaphore-controlled concurrency
@@ -908,6 +1050,50 @@ for row in ad_response:
 - **Why Not GAQL**: `CONTAINS ALL` doesn't support OR conditions or case-insensitive matching
 - **Performance**: Still efficient for thousands of ads (single query + in-memory filtering)
 
+### Check-up Function - Multi-Theme Support
+- **Pattern**: Database-driven theme verification instead of text-based search
+- **Problem**: Original checkup only checked for "SINGLES" text in headlines, couldn't verify other themes
+- **Solution**: Query database to get theme_name for each ad group, check theme-specific labels
+- **Implementation**:
+```python
+# 1. Query database to get theme for each successfully processed ad group
+cur.execute("""
+    SELECT DISTINCT customer_id, ad_group_id, campaign_id, campaign_name,
+                   ad_group_name, theme_name
+    FROM thema_ads_job_items
+    WHERE status = 'successful'
+    AND customer_id = ANY(%s)
+    ORDER BY customer_id, theme_name, ad_group_id
+""", (customer_ids,))
+
+# 2. Group by customer and theme
+by_customer_theme = defaultdict(lambda: defaultdict(list))
+for ag in db_ad_groups:
+    theme_name = ag['theme_name'] or 'singles_day'
+    by_customer_theme[ag['customer_id']][theme_name].append(ag)
+
+# 3. For each theme, get theme-specific label
+from themes import get_theme_label
+theme_label_name = get_theme_label(theme_name)  # e.g., "THEME_BF" for black_friday
+
+# 4. Query Google Ads to check if label still exists on ad group
+label_check_query = f"""
+    SELECT ad_group.id FROM ad_group_label
+    WHERE ad_group.id IN ({ids_str})
+    AND ad_group_label.label = '{theme_label_resource}'
+"""
+
+# 5. Create repair jobs with correct theme_name
+repair_items.append({
+    'customer_id': ag['customer_id'],
+    'ad_group_id': ag['ad_group_id'],
+    'theme_name': theme_name  # ← Preserves correct theme!
+})
+```
+- **Benefit**: Verifies all themes correctly (Black Friday, Cyber Monday, Sinterklaas, Kerstmis, Singles Day)
+- **Key Change**: Database-driven (permanent record) instead of ad text search (can be modified/removed)
+- **Use Case**: Detect ad groups where theme ads were accidentally deleted, create repair jobs with correct theme
+
 ### Repair Job Pattern for Quality Assurance
 - **Pattern**: Use boolean flag to bypass normal validation for repair operations
 - **Use Case**: Check-up function finds processed items missing expected results, creates repair jobs to fix them
@@ -976,4 +1162,4 @@ for customer in customers:
   - **Customer-grouped label checks**: Still batch-check SD_DONE labels per customer for efficiency
 
 ---
-_Last updated: 2025-10-07_
+_Last updated: 2025-10-09_

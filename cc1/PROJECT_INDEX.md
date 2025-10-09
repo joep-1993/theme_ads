@@ -11,19 +11,26 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - **Quality Assurance**: Check-up function audits processed ad groups, verifies ad integrity, creates repair jobs
 
 ### Key Components
-- `backend/main.py` - FastAPI API endpoints (CSV upload, auto-discovery, checkup)
-  - `/api/thema-ads/upload` - CSV upload and job creation
-  - `/api/thema-ads/discover` - Auto-discover ad groups from MCC
-  - `/api/thema-ads/checkup` - Audit processed ad groups, verify SINGLES_DAY ads
+- `backend/main.py` - FastAPI API endpoints (CSV upload, Excel upload, auto-discovery, checkup)
+  - `/api/thema-ads/upload` - CSV upload and job creation (legacy, defaults to singles_day theme)
+  - `/api/thema-ads/upload-excel` - Excel upload with theme column support
+  - `/api/thema-ads/discover` - Auto-discover ad groups from MCC (with theme parameter)
+  - `/api/thema-ads/themes` - Get list of supported themes
+  - `/api/thema-ads/checkup` - Audit processed ad groups, verify theme ads exist (multi-theme aware)
 - `backend/thema_ads_service.py` - Business logic and job processing
-  - `checkup_ad_groups()` - Audits ad groups with SD_DONE label, verifies SINGLES_DAY ads exist, creates repair jobs
+  - `checkup_ad_groups()` - Database-driven multi-theme checkup: queries job_items for theme_name, checks theme-specific labels (THEME_BF, THEME_CM, etc.), creates repair jobs with correct theme
 - `backend/database.py` - Database connection management
-- `frontend/thema-ads.html` - Web UI with 3 tabs (CSV Upload, Auto-Discover, Check-up)
-- `frontend/js/thema-ads.js` - Frontend logic including runCheckup() function
+- `frontend/thema-ads.html` - Web UI with 3 tabs (Excel Upload, CSV Upload, Auto-Discover, Check-up)
+- `frontend/js/thema-ads.js` - Frontend logic including uploadExcel(), runCheckup(), theme loading
+- `themes/` - Theme content directory (black_friday/, cyber_monday/, sinterklaas/, kerstmis/)
+  - Each theme has headlines.txt and descriptions.txt files
+- `thema_ads_optimized/themes.py` - Theme management module (load content, get labels, validate themes)
 - `thema_ads_optimized/account ids` - Whitelist of 28 active customer IDs (discovery loads from this file)
 - `thema_ads_optimized/` - CLI automation tools
 - `thema_ads_optimized/operations/` - Google Ads API operations
+  - `rsa_management.py` - Smart RSA slot management for 3-ad limit (not yet integrated)
 - `thema_ads_optimized/processors/` - Data processing logic
+- `thema_ads_optimized/models.py` - Data models (AdGroupInput with theme_name field)
 
 ## Technology Stack
 
@@ -65,14 +72,15 @@ _Technical reference for the project. Update when: architecture changes, new pat
 
 ### Reliability
 1. **Idempotent Processing** - SD_DONE labels prevent duplicate processing
-2. **Quality Verification** - SD_CHECKED labels track verified ad groups (checkup function)
-   - SD_DONE: Ad group has been processed (ads created/labeled)
-   - SD_CHECKED: Ad group has been audited and verified to have SINGLES_DAY ads
-   - Prevents re-checking already verified ad groups
+2. **Quality Verification** - Multi-theme checkup function (database-driven)
+   - Queries thema_ads_job_items for theme_name of each processed ad group
+   - Checks for theme-specific labels (THEME_BF, THEME_CM, THEME_SK, THEME_KM, THEME_SD)
+   - Creates repair jobs with correct theme_name for ad groups missing their theme ads
+   - Supports all themes: Black Friday, Cyber Monday, Sinterklaas, Kerstmis, Singles Day
 3. **Audit/Repair Workflow** - Checkup function for quality assurance
-   - Pattern: Audit processed items → Verify integrity → Create repair jobs for failures
-   - Use case: Ensure all processed ad groups actually have expected SINGLES_DAY ads
-   - Implementation: Query SD_DONE groups, check for SINGLES_DAY in headlines, create jobs for missing
+   - Pattern: Audit processed items → Verify theme labels → Create repair jobs for missing ads
+   - Use case: Ensure all processed ad groups have their theme-specific ads (database-driven verification)
+   - Implementation: Query database for theme per ad group, check theme labels in Google Ads API, create repair jobs
    - Repair Job Flag: Jobs created by checkup have `is_repair_job=True` to bypass SD_DONE skip logic
      - Database: `thema_ads_jobs.is_repair_job BOOLEAN DEFAULT FALSE`
      - Processor: `ThemaAdsProcessor(config, skip_sd_done_check=is_repair_job)`
@@ -86,6 +94,24 @@ _Technical reference for the project. Update when: architecture changes, new pat
 2. **CSV Flexibility** - Support minimal or full CSV formats
 3. **Excel Compatibility** - Handle scientific notation and encoding issues
 4. **Ad Group Name Lookups** - Resolve IDs from names to avoid Excel precision loss
+
+## Database Schema
+
+### Multi-Theme Support
+- `thema_ads_jobs.theme_name` VARCHAR(50) - Default theme for job (optional, can be NULL for mixed-theme jobs)
+- `thema_ads_job_items.theme_name` VARCHAR(50) - Theme for specific ad group
+- `thema_ads_input_data.theme_name` VARCHAR(50) - Theme from original upload
+- `theme_configs` table - Store active theme configuration per customer (future use)
+  - `customer_id` VARCHAR(50) UNIQUE - Customer account ID
+  - `theme_name` VARCHAR(50) - Active theme for customer
+  - `updated_at`, `created_at` TIMESTAMP - Tracking fields
+
+### Supported Themes
+- `black_friday` - Label: THEME_BF, Display: "Black Friday", Countdown: 2025-11-28
+- `cyber_monday` - Label: THEME_CM, Display: "Cyber Monday", Countdown: 2025-12-01
+- `sinterklaas` - Label: THEME_SK, Display: "Sinterklaas", Countdown: 2025-12-05
+- `kerstmis` - Label: THEME_KM, Display: "Kerstmis", Countdown: 2025-12-25
+- `singles_day` - Label: THEME_SD, Display: "Singles Day", Countdown: 2025-11-11 (legacy)
 
 ## Configuration
 
@@ -129,31 +155,51 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - google-ads-python
 - psycopg2
 - python-dotenv
+- openpyxl (Excel file parsing)
 
 ## File Structure
 ```
 theme_ads/
 ├── backend/
-│   ├── main.py                     # API endpoints (upload, discover, checkup)
-│   ├── thema_ads_service.py        # Business logic (includes checkup_ad_groups)
+│   ├── main.py                     # API endpoints (Excel upload, CSV upload, discover, checkup, themes)
+│   ├── thema_ads_service.py        # Business logic (includes checkup_ad_groups, multi-theme support)
 │   ├── database.py                 # DB connection
-│   └── thema_ads_schema.sql        # DB schema (includes is_repair_job column)
+│   ├── thema_ads_schema.sql        # DB schema (includes is_repair_job, theme_name columns)
+│   └── migrations/
+│       └── add_theme_support.sql   # Migration for multi-theme system
+├── themes/                         # Theme content directory
+│   ├── black_friday/
+│   │   ├── headlines.txt           # 15 Black Friday headlines with countdown
+│   │   └── descriptions.txt        # 4 Black Friday descriptions
+│   ├── cyber_monday/
+│   │   ├── headlines.txt
+│   │   └── descriptions.txt
+│   ├── sinterklaas/
+│   │   ├── headlines.txt
+│   │   └── descriptions.txt
+│   └── kerstmis/
+│       ├── headlines.txt
+│       └── descriptions.txt
 ├── delete_sd_checked_labels.py     # Utility: Delete SD_CHECKED labels from all accounts
+├── remove_singles_day_ads_batch.py # Utility: Remove SINGLES_DAY ads and SD_DONE labels
 ├── frontend/
-│   ├── thema-ads.html              # Web UI (3 tabs: CSV Upload, Auto-Discover, Check-up)
+│   ├── thema-ads.html              # Web UI (4 tabs: Excel Upload, CSV Upload, Auto-Discover, Check-up)
 │   └── js/
-│       └── thema-ads.js            # Frontend logic (includes runCheckup function)
+│       └── thema-ads.js            # Frontend logic (uploadExcel, runCheckup, theme loading)
 ├── thema_ads_optimized/
+│   ├── themes.py                   # Theme management (load content, get labels, validate)
+│   ├── models.py                   # Data models (AdGroupInput with theme_name)
 │   ├── account ids                 # Whitelist of active customer IDs (28 accounts, excludes 16 CANCELED)
-│   ├── main_optimized.py           # CLI entry point
+│   ├── main_optimized.py           # CLI entry point with multi-theme support
 │   ├── operations/                 # Google Ads operations
-│   │   ├── ads.py                  # Ad creation
+│   │   ├── ads.py                  # Ad creation (campaign_theme=1 parameter)
 │   │   ├── labels.py               # Label operations
-│   │   └── prefetch.py             # Bulk data fetching
+│   │   ├── prefetch.py             # Bulk data fetching
+│   │   └── rsa_management.py       # RSA slot management (3-ad limit, not yet integrated)
 │   ├── processors/                 # Data processing
 │   │   └── data_loader.py          # CSV/input handling
 │   ├── templates/                  # Ad templates
-│   │   └── generators.py           # Template generation
+│   │   └── generators.py           # Theme-based template generation
 │   └── utils/                      # Utilities
 │       ├── cache.py                # Caching logic
 │       └── retry.py                # Retry logic with 503 ServiceUnavailable handling
@@ -166,4 +212,4 @@ theme_ads/
 ```
 
 ---
-_Last updated: 2025-10-07_
+_Last updated: 2025-10-09_
