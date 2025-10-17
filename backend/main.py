@@ -8,6 +8,20 @@ from datetime import datetime
 from pathlib import Path
 from backend.database import get_db_connection
 from backend.thema_ads_service import thema_ads_service
+import sys
+
+# Add thema_ads_optimized to path for theme imports
+THEMA_ADS_PATH = Path(__file__).parent.parent / "thema_ads_optimized"
+sys.path.insert(0, str(THEMA_ADS_PATH))
+
+# Import theme module
+from themes import is_valid_theme, get_all_theme_labels, SUPPORTED_THEMES
+
+# Import openpyxl for Excel file parsing
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
 
 app = FastAPI(title="Theme Ads - Google Ads Automation", version="1.0.0")
 
@@ -69,7 +83,8 @@ async def discover_ad_groups(
     background_tasks: BackgroundTasks = None,
     limit: int = None,
     batch_size: int = 5000,
-    job_chunk_size: int = 50000
+    job_chunk_size: int = 50000,
+    theme: str = Form("singles_day")
 ):
     """
     Auto-discover ad groups from Google Ads MCC account.
@@ -80,11 +95,20 @@ async def discover_ad_groups(
         limit: Optional limit on number of ad groups to discover
         batch_size: Batch size for API queries (default: 5000)
         job_chunk_size: Maximum items per job (splits large discoveries into multiple jobs, default: 50000)
+        theme: Theme to apply (default: singles_day)
     """
     import logging
     logger = logging.getLogger(__name__)
 
-    logger.info(f"Discover parameters: limit={limit}, batch_size={batch_size}, job_chunk_size={job_chunk_size}")
+    logger.info(f"Discover parameters: limit={limit}, batch_size={batch_size}, job_chunk_size={job_chunk_size}, theme={theme}")
+
+    # Validate theme
+    if not is_valid_theme(theme):
+        supported_themes = ', '.join(SUPPORTED_THEMES.keys())
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid theme '{theme}'. Supported themes: {supported_themes}"
+        )
 
     try:
         from pathlib import Path
@@ -236,7 +260,8 @@ async def discover_ad_groups(
                     'customer_id': ag_data['customer_id'],
                     'campaign_id': ag_data['campaign_id'],
                     'campaign_name': ag_data['campaign_name'],
-                    'ad_group_id': ag_data['ad_group_id']
+                    'ad_group_id': ag_data['ad_group_id'],
+                    'theme_name': theme
                 })
 
                 # Check limit
@@ -299,20 +324,39 @@ async def discover_ad_groups(
 async def upload_csv(
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = None,
-    batch_size: int = Form(7500)
+    batch_size: int = Form(7500),
+    theme: str = Form("singles_day")
 ):
     """
-    Upload CSV file with customer_id and ad_group_id columns.
-    Creates a new job and automatically starts processing.
+    Upload CSV file with customer_id and optionally ad_group_id/theme columns.
+
+    CSV Modes:
+    1. customer_id + ad_group_id: Process specific ad groups
+    2. customer_id only: Auto-discover all ad groups in customer account
+       - Filters for campaigns starting with 'HS/'
+       - Excludes ad groups with theme's DONE label
+
+    Theme Options:
+    - Include 'theme' column in CSV: Different theme per row
+    - No 'theme' column: Uses form theme parameter for all rows
 
     Args:
         file: CSV file to upload
         batch_size: Batch size for API queries (default: 7500)
+        theme: Default theme to apply (default: singles_day). Overridden by 'theme' column if present.
     """
     import logging
     logger = logging.getLogger(__name__)
 
-    logger.info(f"Upload parameters: batch_size={batch_size}")
+    logger.info(f"Upload parameters: batch_size={batch_size}, theme={theme}")
+
+    # Validate theme
+    if not is_valid_theme(theme):
+        supported_themes = ', '.join(SUPPORTED_THEMES.keys())
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid theme '{theme}'. Supported themes: {supported_themes}"
+        )
 
     try:
         logger.info(f"Receiving file upload: {file.filename}")
@@ -345,24 +389,44 @@ async def upload_csv(
 
         # Parse CSV data
         input_data = []
+        customers_to_discover = {}  # customer_id -> theme mapping for auto-discovery
         headers_seen = None
+        has_theme_column = False
+
         for row_num, row in enumerate(csv_reader):
             if headers_seen is None:
                 headers_seen = list(row.keys())
+                has_theme_column = 'theme' in headers_seen
                 logger.info(f"CSV headers found: {headers_seen}")
+                if has_theme_column:
+                    logger.info("Theme column detected - per-row themes enabled")
 
-            if 'customer_id' in row and 'ad_group_id' in row:
-                # Convert scientific notation to regular numbers (Excel export issue)
-                customer_id = convert_scientific_notation(row['customer_id'])
+            if 'customer_id' not in row:
+                continue
+
+            # Get customer_id
+            customer_id = convert_scientific_notation(row['customer_id'])
+            customer_id = customer_id.strip().replace('-', '')
+
+            if not customer_id:
+                continue
+
+            # Determine theme for this row
+            row_theme = theme  # Default from form parameter
+            if has_theme_column and 'theme' in row and row['theme'].strip():
+                row_theme = row['theme'].strip().lower()
+                # Validate theme
+                if not is_valid_theme(row_theme):
+                    logger.warning(f"Invalid theme '{row_theme}' in row {row_num + 2}, using default '{theme}'")
+                    row_theme = theme
+
+            # Check if ad_group_id is provided
+            has_ad_group_id = 'ad_group_id' in row and row['ad_group_id'].strip()
+
+            if has_ad_group_id:
+                # Mode 1: Specific ad group provided
                 ad_group_id = convert_scientific_notation(row['ad_group_id'])
-
-                # Remove dashes from customer_id (Google Ads API requirement)
-                customer_id = customer_id.strip().replace('-', '')
                 ad_group_id = ad_group_id.strip()
-
-                # Skip empty rows
-                if not customer_id or not ad_group_id:
-                    continue
 
                 item = {
                     'customer_id': customer_id,
@@ -376,16 +440,160 @@ async def upload_csv(
                 if 'campaign_name' in row and row['campaign_name'].strip():
                     item['campaign_name'] = row['campaign_name'].strip()
 
-                # Add optional ad_group_name if provided (better than ID due to Excel precision loss)
+                # Add optional ad_group_name if provided
                 if 'ad_group_name' in row and row['ad_group_name'].strip():
                     item['ad_group_name'] = row['ad_group_name'].strip()
 
-                input_data.append(item)
+                # Add theme for this row
+                item['theme_name'] = row_theme
 
-        logger.info(f"Parsed {len(input_data)} rows from CSV")
+                input_data.append(item)
+            else:
+                # Mode 2: Only customer_id provided - need auto-discovery
+                # Store customer_id with its theme
+                if customer_id not in customers_to_discover:
+                    customers_to_discover[customer_id] = row_theme
+                    logger.info(f"Customer {customer_id} marked for auto-discovery with theme '{row_theme}'")
+
+        logger.info(f"Parsed {len(input_data)} specific ad groups and {len(customers_to_discover)} customers for auto-discovery")
+
+        # Auto-discover ad groups for customers without ad_group_id
+        if customers_to_discover:
+            logger.info(f"Starting auto-discovery for {len(customers_to_discover)} customers...")
+
+            try:
+                from pathlib import Path
+                from dotenv import load_dotenv
+
+                # Load environment variables
+                env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+                if env_path.exists():
+                    load_dotenv(env_path)
+                else:
+                    raise HTTPException(status_code=500, detail="Google Ads credentials not configured")
+
+                from config import load_config_from_env
+                from google_ads_client import initialize_client
+                from themes import get_theme_label
+
+                config = load_config_from_env()
+                client = initialize_client(config.google_ads)
+                ga_service = client.get_service("GoogleAdsService")
+
+                # Discover ad groups for each customer with their specific theme
+                for customer_id, customer_theme in customers_to_discover.items():
+                    logger.info(f"Discovering ad groups for customer {customer_id} with theme '{customer_theme}'")
+
+                    # Get the done-label name for this customer's theme
+                    theme_label = get_theme_label(customer_theme)
+                    done_label_name = f"{theme_label}_DONE"
+                    logger.info(f"  Filtering out ad groups with label: {done_label_name}")
+
+                    try:
+                        # Query for ad groups in HS/ campaigns
+                        ad_query = """
+                            SELECT
+                                ad_group_ad.ad_group,
+                                ad_group.id,
+                                ad_group.name,
+                                campaign.id,
+                                campaign.name
+                            FROM ad_group_ad
+                            WHERE campaign.name LIKE 'HS/%'
+                            AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+                            AND ad_group_ad.status != REMOVED
+                            AND ad_group.status = 'ENABLED'
+                            AND campaign.status = 'ENABLED'
+                        """
+
+                        ad_response = ga_service.search(customer_id=customer_id, query=ad_query)
+
+                        # Collect unique ad groups
+                        ad_group_map = {}
+                        for row in ad_response:
+                            ag_resource = row.ad_group_ad.ad_group
+                            if ag_resource not in ad_group_map:
+                                ad_group_map[ag_resource] = {
+                                    'customer_id': customer_id,
+                                    'campaign_id': str(row.campaign.id),
+                                    'campaign_name': row.campaign.name,
+                                    'ad_group_id': str(row.ad_group.id),
+                                    'ad_group_name': row.ad_group.name,
+                                    'ad_group_resource': ag_resource
+                                }
+
+                        logger.info(f"  Found {len(ad_group_map)} ad groups in HS/ campaigns")
+
+                        if not ad_group_map:
+                            continue
+
+                        # Check for done-label
+                        ag_with_done_label = set()
+
+                        # Get done-label resource
+                        done_label_query = f"""
+                            SELECT label.resource_name
+                            FROM label
+                            WHERE label.name = '{done_label_name}'
+                            LIMIT 1
+                        """
+
+                        done_label_resource = None
+                        try:
+                            label_response = ga_service.search(customer_id=customer_id, query=done_label_query)
+                            for row in label_response:
+                                done_label_resource = row.label.resource_name
+                                break
+                        except Exception as e:
+                            logger.warning(f"  Could not find {done_label_name} label: {e}")
+
+                        if done_label_resource:
+                            # Query ad groups with done-label in batches
+                            ad_group_resources = list(ad_group_map.keys())
+                            for i in range(0, len(ad_group_resources), batch_size):
+                                batch = ad_group_resources[i:i + batch_size]
+                                resources_str = ", ".join(f"'{r}'" for r in batch)
+
+                                label_check_query = f"""
+                                    SELECT ad_group_label.ad_group
+                                    FROM ad_group_label
+                                    WHERE ad_group_label.ad_group IN ({resources_str})
+                                    AND ad_group_label.label = '{done_label_resource}'
+                                """
+
+                                label_response = ga_service.search(customer_id=customer_id, query=label_check_query)
+                                for row in label_response:
+                                    ag_with_done_label.add(row.ad_group_label.ad_group)
+
+                            logger.info(f"  {len(ag_with_done_label)} ad groups already have {done_label_name} label")
+
+                        # Add ad groups without done-label to input_data
+                        for ag_resource, ag_data in ad_group_map.items():
+                            if ag_resource not in ag_with_done_label:
+                                input_data.append({
+                                    'customer_id': ag_data['customer_id'],
+                                    'campaign_id': ag_data['campaign_id'],
+                                    'campaign_name': ag_data['campaign_name'],
+                                    'ad_group_id': ag_data['ad_group_id'],
+                                    'ad_group_name': ag_data['ad_group_name'],
+                                    'theme_name': customer_theme
+                                })
+
+                        discovered_count = len(ad_group_map) - len(ag_with_done_label)
+                        logger.info(f"  Discovered {discovered_count} ad groups to process")
+
+                    except Exception as e:
+                        logger.warning(f"Error discovering ad groups for customer {customer_id}: {e}")
+                        continue
+
+                logger.info(f"Auto-discovery complete. Total ad groups to process: {len(input_data)}")
+
+            except Exception as e:
+                logger.error(f"Auto-discovery failed: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Auto-discovery failed: {str(e)}")
 
         if not input_data:
-            error_msg = f"CSV must contain 'customer_id' and 'ad_group_id' columns. Found headers: {headers_seen}"
+            error_msg = f"No ad groups found to process. CSV must contain 'customer_id' column (with optional 'ad_group_id'). Found headers: {headers_seen}"
             logger.error(error_msg)
             raise HTTPException(
                 status_code=400,
@@ -412,6 +620,314 @@ async def upload_csv(
         raise
     except Exception as e:
         logger.error(f"Upload failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/thema-ads/upload-excel")
+async def upload_excel(
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
+    batch_size: int = Form(7500)
+):
+    """
+    Upload Excel file with customer_id, ad_group_id, and theme columns.
+    Creates a new job and automatically starts processing.
+
+    Args:
+        file: Excel file (.xlsx) to upload
+        batch_size: Batch size for API queries (default: 7500)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"Excel upload parameters: batch_size={batch_size}")
+
+    if not openpyxl:
+        raise HTTPException(
+            status_code=500,
+            detail="Excel support not available. Please install openpyxl: pip install openpyxl"
+        )
+
+    try:
+        logger.info(f"Receiving Excel file upload: {file.filename}")
+
+        # Validate file extension
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(
+                status_code=400,
+                detail="File must be an Excel file (.xlsx or .xls)"
+            )
+
+        # Read file contents
+        contents = await file.read()
+        logger.info(f"File size: {len(contents)} bytes")
+
+        # Load Excel workbook from bytes
+        workbook = openpyxl.load_workbook(io.BytesIO(contents), read_only=True, data_only=True)
+        sheet = workbook.active
+        logger.info(f"Loaded Excel sheet: {sheet.title}")
+
+        # Read header row
+        headers = []
+        for cell in sheet[1]:
+            headers.append(cell.value)
+        logger.info(f"Excel headers found: {headers}")
+
+        # Validate required columns (only customer_id and theme are required)
+        required_columns = ['customer_id', 'theme']
+        missing_columns = [col for col in required_columns if col not in headers]
+        if missing_columns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Excel file must contain columns: {', '.join(required_columns)}. Missing: {', '.join(missing_columns)}"
+            )
+
+        # Find column indices
+        customer_id_idx = headers.index('customer_id')
+        ad_group_id_idx = headers.index('ad_group_id') if 'ad_group_id' in headers else None
+        theme_idx = headers.index('theme')
+
+        # Optional columns
+        campaign_id_idx = headers.index('campaign_id') if 'campaign_id' in headers else None
+        campaign_name_idx = headers.index('campaign_name') if 'campaign_name' in headers else None
+        ad_group_name_idx = headers.index('ad_group_name') if 'ad_group_name' in headers else None
+
+        # Parse data rows
+        input_data = []
+        customers_to_discover = {}  # customer_id -> theme mapping for auto-discovery
+        invalid_themes = set()
+
+        # Calculate required indices for length check
+        required_indices = [customer_id_idx, theme_idx]
+        if ad_group_id_idx is not None:
+            required_indices.append(ad_group_id_idx)
+        max_required_idx = max(required_indices)
+
+        for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+            if not row or len(row) <= max_required_idx:
+                continue
+
+            customer_id = row[customer_id_idx]
+            theme = row[theme_idx]
+
+            # Skip empty rows (customer_id and theme are required)
+            if not customer_id or not theme:
+                continue
+
+            # Convert to string and clean
+            customer_id = str(customer_id).strip().replace('-', '')
+            theme = str(theme).strip().lower()
+
+            # Convert scientific notation if needed
+            customer_id = convert_scientific_notation(customer_id)
+
+            # Validate theme
+            if not is_valid_theme(theme):
+                invalid_themes.add(theme)
+                continue
+
+            # Check if ad_group_id is provided
+            has_ad_group_id = ad_group_id_idx is not None and row[ad_group_id_idx]
+
+            if has_ad_group_id:
+                # Mode 1: Specific ad group provided
+                ad_group_id = str(row[ad_group_id_idx]).strip()
+                ad_group_id = convert_scientific_notation(ad_group_id)
+
+                item = {
+                    'customer_id': customer_id,
+                    'ad_group_id': ad_group_id,
+                    'theme_name': theme
+                }
+
+                # Add optional columns
+                if campaign_id_idx is not None and len(row) > campaign_id_idx and row[campaign_id_idx]:
+                    campaign_id = convert_scientific_notation(str(row[campaign_id_idx]).strip())
+                    item['campaign_id'] = campaign_id
+                if campaign_name_idx is not None and len(row) > campaign_name_idx and row[campaign_name_idx]:
+                    item['campaign_name'] = str(row[campaign_name_idx]).strip()
+                if ad_group_name_idx is not None and len(row) > ad_group_name_idx and row[ad_group_name_idx]:
+                    item['ad_group_name'] = str(row[ad_group_name_idx]).strip()
+
+                input_data.append(item)
+            else:
+                # Mode 2: Only customer_id and theme provided - need auto-discovery
+                if customer_id not in customers_to_discover:
+                    customers_to_discover[customer_id] = theme
+                    logger.info(f"Customer {customer_id} marked for auto-discovery with theme '{theme}'")
+
+        workbook.close()
+        logger.info(f"Parsed {len(input_data)} specific ad groups and {len(customers_to_discover)} customers for auto-discovery")
+
+        # Auto-discover ad groups for customers without ad_group_id
+        if customers_to_discover:
+            logger.info(f"Starting auto-discovery for {len(customers_to_discover)} customers...")
+
+            try:
+                from pathlib import Path
+                from dotenv import load_dotenv
+
+                # Load environment variables
+                env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+                if env_path.exists():
+                    load_dotenv(env_path)
+                else:
+                    raise HTTPException(status_code=500, detail="Google Ads credentials not configured")
+
+                from config import load_config_from_env
+                from google_ads_client import initialize_client
+                from themes import get_theme_label
+
+                config = load_config_from_env()
+                client = initialize_client(config.google_ads)
+                ga_service = client.get_service("GoogleAdsService")
+
+                # Discover ad groups for each customer with their specific theme
+                for customer_id, customer_theme in customers_to_discover.items():
+                    logger.info(f"Discovering ad groups for customer {customer_id} with theme '{customer_theme}'")
+
+                    # Get the done-label name for this customer's theme
+                    theme_label = get_theme_label(customer_theme)
+                    done_label_name = f"{theme_label}_DONE"
+                    logger.info(f"  Filtering out ad groups with label: {done_label_name}")
+
+                    try:
+                        # Query for ad groups in HS/ campaigns
+                        ad_query = """
+                            SELECT
+                                ad_group_ad.ad_group,
+                                ad_group.id,
+                                ad_group.name,
+                                campaign.id,
+                                campaign.name
+                            FROM ad_group_ad
+                            WHERE campaign.name LIKE 'HS/%'
+                            AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+                            AND ad_group_ad.status != REMOVED
+                            AND ad_group.status = 'ENABLED'
+                            AND campaign.status = 'ENABLED'
+                        """
+
+                        ad_response = ga_service.search(customer_id=customer_id, query=ad_query)
+
+                        # Collect unique ad groups
+                        ad_group_map = {}
+                        for row in ad_response:
+                            ag_resource = row.ad_group_ad.ad_group
+                            if ag_resource not in ad_group_map:
+                                ad_group_map[ag_resource] = {
+                                    'customer_id': customer_id,
+                                    'campaign_id': str(row.campaign.id),
+                                    'campaign_name': row.campaign.name,
+                                    'ad_group_id': str(row.ad_group.id),
+                                    'ad_group_name': row.ad_group.name,
+                                    'ad_group_resource': ag_resource
+                                }
+
+                        logger.info(f"  Found {len(ad_group_map)} ad groups in HS/ campaigns")
+
+                        if not ad_group_map:
+                            continue
+
+                        # Check for done-label
+                        ag_with_done_label = set()
+
+                        # Get done-label resource
+                        done_label_query = f"""
+                            SELECT label.resource_name
+                            FROM label
+                            WHERE label.name = '{done_label_name}'
+                            LIMIT 1
+                        """
+
+                        done_label_resource = None
+                        try:
+                            label_response = ga_service.search(customer_id=customer_id, query=done_label_query)
+                            for row in label_response:
+                                done_label_resource = row.label.resource_name
+                                break
+                        except Exception as e:
+                            logger.warning(f"  Could not find {done_label_name} label: {e}")
+
+                        if done_label_resource:
+                            # Query ad groups with done-label in batches
+                            ad_group_resources = list(ad_group_map.keys())
+                            for i in range(0, len(ad_group_resources), batch_size):
+                                batch = ad_group_resources[i:i + batch_size]
+                                resources_str = ", ".join(f"'{r}'" for r in batch)
+
+                                label_check_query = f"""
+                                    SELECT ad_group_label.ad_group
+                                    FROM ad_group_label
+                                    WHERE ad_group_label.ad_group IN ({resources_str})
+                                    AND ad_group_label.label = '{done_label_resource}'
+                                """
+
+                                label_response = ga_service.search(customer_id=customer_id, query=label_check_query)
+                                for row in label_response:
+                                    ag_with_done_label.add(row.ad_group_label.ad_group)
+
+                            logger.info(f"  {len(ag_with_done_label)} ad groups already have {done_label_name} label")
+
+                        # Add ad groups without done-label to input_data
+                        for ag_resource, ag_data in ad_group_map.items():
+                            if ag_resource not in ag_with_done_label:
+                                input_data.append({
+                                    'customer_id': ag_data['customer_id'],
+                                    'campaign_id': ag_data['campaign_id'],
+                                    'campaign_name': ag_data['campaign_name'],
+                                    'ad_group_id': ag_data['ad_group_id'],
+                                    'ad_group_name': ag_data['ad_group_name'],
+                                    'theme_name': customer_theme
+                                })
+
+                        discovered_count = len(ad_group_map) - len(ag_with_done_label)
+                        logger.info(f"  Discovered {discovered_count} ad groups to process")
+
+                    except Exception as e:
+                        logger.warning(f"Error discovering ad groups for customer {customer_id}: {e}")
+                        continue
+
+                logger.info(f"Auto-discovery complete. Total ad groups to process: {len(input_data)}")
+
+            except Exception as e:
+                logger.error(f"Auto-discovery failed: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Auto-discovery failed: {str(e)}")
+
+        if invalid_themes:
+            supported_themes = ', '.join(SUPPORTED_THEMES.keys())
+            logger.warning(f"Skipped rows with invalid themes: {invalid_themes}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid theme(s) found: {', '.join(invalid_themes)}. Supported themes: {supported_themes}"
+            )
+
+        if not input_data:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid data rows found in Excel file"
+            )
+
+        # Create job with batch_size
+        logger.info("Creating job in database...")
+        job_id = thema_ads_service.create_job(input_data, batch_size=batch_size)
+        logger.info(f"Job created with ID: {job_id}, batch_size: {batch_size}")
+
+        # Automatically start the job
+        if background_tasks:
+            background_tasks.add_task(thema_ads_service.process_job, job_id)
+            logger.info(f"Job {job_id} queued for automatic processing")
+
+        return {
+            "job_id": job_id,
+            "total_items": len(input_data),
+            "status": "processing"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Excel upload failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -657,6 +1173,139 @@ async def download_successful_items(job_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/thema-ads/jobs/{job_id}/plan")
+async def get_job_plan(job_id: int):
+    """Get the uploaded plan (input data) for a job, showing theme distribution."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Get all input data with themes
+        cur.execute("""
+            SELECT
+                customer_id,
+                campaign_id,
+                campaign_name,
+                ad_group_id,
+                ad_group_name,
+                theme_name
+            FROM thema_ads_input_data
+            WHERE job_id = %s
+            ORDER BY customer_id, theme_name, ad_group_id
+        """, (job_id,))
+
+        items = cur.fetchall()
+
+        if not items:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="No plan found for this job")
+
+        # Calculate theme statistics
+        from collections import defaultdict
+        theme_counts = defaultdict(int)
+        customer_theme_counts = defaultdict(lambda: defaultdict(int))
+
+        for item in items:
+            theme = item['theme_name'] or 'singles_day'
+            customer_id = item['customer_id']
+            theme_counts[theme] += 1
+            customer_theme_counts[customer_id][theme] += 1
+
+        # Get job info
+        cur.execute("""
+            SELECT id, created_at, status, total_ad_groups
+            FROM thema_ads_jobs
+            WHERE id = %s
+        """, (job_id,))
+
+        job = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        # Convert to list of dicts for response
+        plan_items = [dict(item) for item in items]
+
+        return {
+            "job_id": job_id,
+            "created_at": job['created_at'],
+            "status": job['status'],
+            "total_ad_groups": job['total_ad_groups'],
+            "theme_distribution": dict(theme_counts),
+            "customer_theme_distribution": {
+                cid: dict(themes) for cid, themes in customer_theme_counts.items()
+            },
+            "plan_items": plan_items
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/thema-ads/jobs/{job_id}/plan-csv")
+async def download_job_plan(job_id: int):
+    """Download the uploaded plan (input data) for a job as CSV."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Get all input data
+        cur.execute("""
+            SELECT
+                customer_id,
+                campaign_id,
+                campaign_name,
+                ad_group_id,
+                ad_group_name,
+                theme_name
+            FROM thema_ads_input_data
+            WHERE job_id = %s
+            ORDER BY customer_id, theme_name, ad_group_id
+        """, (job_id,))
+
+        items = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not items:
+            raise HTTPException(status_code=404, detail="No plan found for this job")
+
+        # Create CSV in memory
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Write header
+        writer.writerow(['customer_id', 'campaign_id', 'campaign_name', 'ad_group_id', 'ad_group_name', 'theme'])
+
+        # Write data
+        for item in items:
+            writer.writerow([
+                item['customer_id'],
+                item['campaign_id'] or '',
+                item['campaign_name'] or '',
+                item['ad_group_id'],
+                item['ad_group_name'] or '',
+                item['theme_name'] or 'singles_day'
+            ])
+
+        # Prepare response
+        output.seek(0)
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename=job_{job_id}_plan.csv"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/thema-ads/checkup")
 async def checkup_ad_groups(
     background_tasks: BackgroundTasks = None,
@@ -721,4 +1370,22 @@ async def checkup_ad_groups(
         raise
     except Exception as e:
         logger.error(f"Checkup failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/thema-ads/themes")
+async def list_themes():
+    """Get list of supported themes."""
+    try:
+        themes = []
+        for theme_name, theme_info in SUPPORTED_THEMES.items():
+            themes.append({
+                "name": theme_name,
+                "label": theme_info["label"],
+                "display_name": theme_info["display_name"],
+                "countdown_date": theme_info["countdown_date"]
+            })
+        return {"themes": themes}
+
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

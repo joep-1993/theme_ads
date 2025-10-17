@@ -54,16 +54,19 @@
                                     <strong>Required Columns:</strong>
                                     <ul class="mb-0">
                                         <li><code>customer_id</code> - Google Ads customer ID (without dashes)</li>
-                                        <li><code>ad_group_id</code> - Ad group ID</li>
                                         <li><code>theme</code> - Theme name (see supported themes below)</li>
                                     </ul>
                                     <hr>
                                     <strong>Optional Columns:</strong>
                                     <ul class="mb-0">
+                                        <li><code>ad_group_id</code> - Ad group ID (if omitted, will auto-discover ad groups)</li>
                                         <li><code>campaign_id</code> - Campaign ID</li>
                                         <li><code>campaign_name</code> - Campaign name</li>
                                         <li><code>ad_group_name</code> - Ad group name</li>
                                     </ul>
+                                    <p class="mt-2 mb-0"><small>
+                                        <strong>Auto-discovery mode:</strong> When <code>ad_group_id</code> is not provided, the system will automatically discover all ad groups in HS/ campaigns for that customer (excluding ad groups with the theme's DONE label).
+                                    </small></p>
                                 </div>
                                 <div class="mb-3">
                                     <label for="excelFile" class="form-label">Select Excel File</label>
@@ -86,14 +89,29 @@
 
                             <!-- CSV Upload Tab -->
                             <div class="tab-pane fade" id="csvUpload" role="tabpanel">
-                                <h6>Upload Ad Groups - Single Theme</h6>
-                                <p class="text-muted">Upload a CSV file with <code>customer_id</code> and <code>ad_group_id</code> columns. All ad groups will use the same theme.</p>
+                                <h6>Upload Ad Groups - Flexible Themes</h6>
+                                <p class="text-muted">
+                                    Upload a CSV file with <code>customer_id</code> (required) and optional <code>ad_group_id</code> / <code>theme</code> columns.<br>
+                                    <small>
+                                        <strong>Two modes:</strong><br>
+                                        • <strong>Specific ad groups:</strong> <code>customer_id</code> + <code>ad_group_id</code> for targeted processing<br>
+                                        • <strong>Auto-discover:</strong> <code>customer_id</code> only - finds all ad groups in HS/ campaigns without theme's DONE label<br>
+                                        <br>
+                                        <strong>Theme options:</strong><br>
+                                        • <strong>With theme column:</strong> Different theme per row (e.g., <code>customer_id,theme</code> with values like <code>123456,black_friday</code>)<br>
+                                        • <strong>Without theme column:</strong> Uses dropdown selection below for all rows<br>
+                                        <br>
+                                        <strong>Auto-cleanup:</strong> Respects 3 RSA limit per ad group. When at limit, removes:<br>
+                                        &nbsp;&nbsp;1) Paused theme ads first<br>
+                                        &nbsp;&nbsp;2) Active theme ads from other themes
+                                    </small>
+                                </p>
                                 <div class="mb-3">
-                                    <label for="csvTheme" class="form-label">Theme</label>
+                                    <label for="csvTheme" class="form-label">Default Theme</label>
                                     <select class="form-select" id="csvTheme" style="max-width: 300px;">
                                         <option value="">Loading themes...</option>
                                     </select>
-                                    <small class="text-muted">Select which theme to apply to all ad groups in the CSV</small>
+                                    <small class="text-muted">Default theme (used when CSV doesn't have a 'theme' column)</small>
                                 </div>
                                 <div class="mb-3">
                                     <label for="csvFile" class="form-label">Select CSV File</label>
