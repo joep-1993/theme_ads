@@ -88,8 +88,8 @@ async def discover_ad_groups(
 ):
     """
     Auto-discover ad groups from Google Ads MCC account.
-    Finds all 'Beslist.nl -' accounts, campaigns starting with 'HS/',
-    and ad groups without SD_DONE label.
+    Finds all accounts, campaigns starting with 'HS/',
+    and ad groups without the theme's DONE label (e.g., THEME_BF_DONE for Black Friday).
 
     Args:
         limit: Optional limit on number of ad groups to discover
@@ -123,6 +123,7 @@ async def discover_ad_groups(
 
         from config import load_config_from_env
         from google_ads_client import initialize_client
+        from themes import get_theme_label
 
         config = load_config_from_env()
         client = initialize_client(config.google_ads)
@@ -204,8 +205,13 @@ async def discover_ad_groups(
                 "customers_found": len(beslist_customers)
             }
 
-        # Batch check SD_DONE labels (group by customer for API efficiency)
-        ag_with_sd_done = set()
+        # Get theme-specific DONE label name
+        theme_label = get_theme_label(theme)
+        done_label_name = f"{theme_label}_DONE"
+        logger.info(f"Filtering out ad groups with label: {done_label_name}")
+
+        # Batch check theme DONE labels (group by customer for API efficiency)
+        ag_with_done_label = set()
 
         for customer in beslist_customers:
             customer_id = customer['id']
@@ -219,21 +225,21 @@ async def discover_ad_groups(
             if not customer_ag_resources:
                 continue
 
-            # Get SD_DONE label resource
-            sd_done_query = """
+            # Get theme DONE label resource
+            done_label_query = f"""
                 SELECT label.resource_name
                 FROM label
-                WHERE label.name = 'SD_DONE'
+                WHERE label.name = '{done_label_name}'
                 LIMIT 1
             """
             try:
-                sd_label_response = ga_service.search(customer_id=customer_id, query=sd_done_query)
-                sd_done_resource = None
-                for row in sd_label_response:
-                    sd_done_resource = row.label.resource_name
+                label_response = ga_service.search(customer_id=customer_id, query=done_label_query)
+                done_label_resource = None
+                for row in label_response:
+                    done_label_resource = row.label.resource_name
                     break
 
-                if sd_done_resource:
+                if done_label_resource:
                     # Batch query in chunks using configured batch_size
                     for i in range(0, len(customer_ag_resources), batch_size):
                         batch = customer_ag_resources[i:i + batch_size]
@@ -243,19 +249,21 @@ async def discover_ad_groups(
                             SELECT ad_group_label.ad_group
                             FROM ad_group_label
                             WHERE ad_group_label.ad_group IN ({resources_str})
-                            AND ad_group_label.label = '{sd_done_resource}'
+                            AND ad_group_label.label = '{done_label_resource}'
                         """
 
                         label_response = ga_service.search(customer_id=customer_id, query=label_check_query)
                         for row in label_response:
-                            ag_with_sd_done.add(row.ad_group_label.ad_group)
+                            ag_with_done_label.add(row.ad_group_label.ad_group)
 
             except Exception as e:
-                logger.warning(f"  Could not check SD_DONE labels for customer {customer_id}: {e}")
+                logger.warning(f"  Could not check {done_label_name} labels for customer {customer_id}: {e}")
 
-        # Build input data from ad groups without SD_DONE label
+        logger.info(f"Found {len(ag_with_done_label)} ad groups with {done_label_name} label")
+
+        # Build input data from ad groups without theme DONE label
         for ag_resource, ag_data in ad_group_map.items():
-            if ag_resource not in ag_with_sd_done:
+            if ag_resource not in ag_with_done_label:
                 input_data.append({
                     'customer_id': ag_data['customer_id'],
                     'campaign_id': ag_data['campaign_id'],
@@ -670,16 +678,25 @@ async def upload_excel(
         # Read header row
         headers = []
         for cell in sheet[1]:
-            headers.append(cell.value)
+            # Skip None/empty cells and normalize headers
+            if cell.value:
+                header = str(cell.value).strip().lower()
+                headers.append(header)
+            else:
+                headers.append(None)
+
+        # Filter out None values for validation
+        valid_headers = [h for h in headers if h is not None]
         logger.info(f"Excel headers found: {headers}")
+        logger.info(f"Valid headers (normalized): {valid_headers}")
 
         # Validate required columns (only customer_id and theme are required)
         required_columns = ['customer_id', 'theme']
-        missing_columns = [col for col in required_columns if col not in headers]
+        missing_columns = [col for col in required_columns if col not in valid_headers]
         if missing_columns:
             raise HTTPException(
                 status_code=400,
-                detail=f"Excel file must contain columns: {', '.join(required_columns)}. Missing: {', '.join(missing_columns)}"
+                detail=f"Excel file must contain columns: {', '.join(required_columns)}. Missing: {', '.join(missing_columns)}. Found headers: {', '.join(valid_headers)}"
             )
 
         # Find column indices
@@ -908,19 +925,52 @@ async def upload_excel(
                 detail="No valid data rows found in Excel file"
             )
 
-        # Create job with batch_size
-        logger.info("Creating job in database...")
-        job_id = thema_ads_service.create_job(input_data, batch_size=batch_size)
-        logger.info(f"Job created with ID: {job_id}, batch_size: {batch_size}")
+        # Split input data by theme first, then into 50K chunks per theme
+        from collections import defaultdict
+        by_theme = defaultdict(list)
+        for item in input_data:
+            theme = item.get('theme_name', 'singles_day')
+            by_theme[theme].append(item)
 
-        # Automatically start the job
-        if background_tasks:
-            background_tasks.add_task(thema_ads_service.process_job, job_id)
-            logger.info(f"Job {job_id} queued for automatic processing")
+        logger.info(f"Found {len(by_theme)} themes in uploaded data:")
+        for theme, items in by_theme.items():
+            logger.info(f"  - {theme}: {len(items)} ad groups")
+
+        # Create jobs (split by theme, then by 50K chunks)
+        JOB_CHUNK_SIZE = 50000
+        job_ids = []
+        total_jobs = 0
+
+        for theme, theme_items in by_theme.items():
+            num_chunks = (len(theme_items) + JOB_CHUNK_SIZE - 1) // JOB_CHUNK_SIZE
+
+            if num_chunks > 1:
+                logger.info(f"Theme '{theme}': Splitting {len(theme_items)} ad groups into {num_chunks} jobs")
+
+            for chunk_idx in range(num_chunks):
+                start_idx = chunk_idx * JOB_CHUNK_SIZE
+                end_idx = min(start_idx + JOB_CHUNK_SIZE, len(theme_items))
+                chunk_data = theme_items[start_idx:end_idx]
+
+                # Create job for this chunk
+                job_id = thema_ads_service.create_job(chunk_data, batch_size=batch_size)
+                job_ids.append(job_id)
+                total_jobs += 1
+
+                logger.info(f"Created job {job_id}: theme='{theme}', items={len(chunk_data)} (chunk {chunk_idx + 1}/{num_chunks})")
+
+                # Automatically start the job
+                if background_tasks:
+                    background_tasks.add_task(thema_ads_service.process_job, job_id)
+
+        logger.info(f"Created {total_jobs} jobs total for {len(input_data)} ad groups across {len(by_theme)} themes")
 
         return {
-            "job_id": job_id,
+            "job_ids": job_ids,
+            "jobs_created": total_jobs,
             "total_items": len(input_data),
+            "themes": list(by_theme.keys()),
+            "items_per_theme": {theme: len(items) for theme, items in by_theme.items()},
             "status": "processing"
         }
 

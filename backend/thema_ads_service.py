@@ -60,12 +60,15 @@ class ThemaAdsService:
         cur = conn.cursor()
 
         try:
-            # Create job with batch_size and repair flag
+            # Determine theme from input data (use first item's theme or default to singles_day)
+            theme_name = input_data[0].get('theme_name', 'singles_day') if input_data else 'singles_day'
+
+            # Create job with batch_size, repair flag, and theme
             cur.execute("""
-                INSERT INTO thema_ads_jobs (status, total_ad_groups, batch_size, is_repair_job)
-                VALUES ('pending', %s, %s, %s)
+                INSERT INTO thema_ads_jobs (status, total_ad_groups, batch_size, is_repair_job, theme_name)
+                VALUES ('pending', %s, %s, %s, %s)
                 RETURNING id
-            """, (len(input_data), batch_size, is_repair_job))
+            """, (len(input_data), batch_size, is_repair_job, theme_name))
 
             job_id = cur.fetchone()['id']
 
