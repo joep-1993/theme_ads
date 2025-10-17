@@ -1,0 +1,17 @@
+        "{KeyWord: Kerstmis}",
+        "Kerstmis in {COUNTDOWN(2025-12-25 00:00:00,5)}",
+        "{KeyWord:Kerst Deals} Online",
+        "Bestel {KeyWord:Vandaag} Met Korting",
+        "{KeyWord:Aanbieding} – Gratis Verzending",
+        "Top {KeyWord:Acties} – Shop Nu",
+        "{KeyWord:Sale} Niet Missen!",
+        "Nog {COUNTDOWN(2025-12-25 00:00:00,5)} Tot Kerst",
+        "Kerst – Eindigt Over {COUNTDOWN(2025-12-25 00:00:00,5)}",
+        "Shop Nu – Slechts {COUNTDOWN(2025-12-25 00:00:00,5)} Te Gaan",
+        "Kerst Start In {COUNTDOWN(2025-12-25 00:00:00,5)}",
+        "{KeyWord:Kerst Deal} – Nog {COUNTDOWN(2025-12-25 00:00:00,5)}",
+        "{KeyWord:Aanbieding} Eindigt Over {COUNTDOWN(2025-12-25 00:00:00,5)}",
+        "Snel! {KeyWord:Sale} – {COUNTDOWN(2025-12-25 00:00:00,5)} Te Gaan",
+        "{KeyWord:Acties} Starten In {COUNTDOWN(2025-12-25 00:00:00,5)}"
+
+

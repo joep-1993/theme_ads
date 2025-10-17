@@ -113,6 +113,33 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - `kerstmis` - Label: THEME_KM, Display: "Kerstmis", Countdown: 2025-12-25
 - `singles_day` - Label: THEME_SD, Display: "Singles Day", Countdown: 2025-11-11 (legacy)
 
+**Important - RSA Countdown Syntax:**
+- RSA countdown format differs from standard Google Ads format
+- **RSA Format**: `{COUNTDOWN(yyyy-MM-dd HH:mm:ss,daysBefore)}`
+- **Example**: `{COUNTDOWN(2025-11-28 00:00:00,5)}`
+- **NOT** standard format: `{=COUNTDOWN("yyyy/MM/dd HH:mm:ss","language")}` ❌
+- Key differences:
+  - No `=` sign after opening brace
+  - Date uses dashes (ISO format), not slashes
+  - No quotes around parameters
+  - Uses `daysBefore` parameter (integer) instead of language code
+- All theme template files use RSA format in headlines.txt and descriptions.txt
+
+## Operations
+
+### Database Operations
+
+**Bulk Job Deletion** - Clear all jobs from database (testing/recovery)
+```bash
+# Use case: Clear failed jobs after fixing errors, start fresh
+docker-compose up -d  # Ensure containers are running
+docker-compose exec -T db psql -U postgres -d thema_ads -c "DELETE FROM thema_ads_jobs;"
+# Cascades to thema_ads_job_items automatically
+```
+- **When to use**: After fixing critical bugs (e.g., countdown syntax), before fresh run
+- **Example**: Session 2025-10-17 - Removed 13 failed jobs after countdown syntax fix
+- **Note**: Deleting jobs does NOT affect Google Ads data; only clears local processing state
+
 ## Configuration
 
 ### Environment Variables
@@ -169,17 +196,18 @@ theme_ads/
 │       └── add_theme_support.sql   # Migration for multi-theme system
 ├── themes/                         # Theme content directory
 │   ├── black_friday/
-│   │   ├── headlines.txt           # 15 Black Friday headlines with countdown
-│   │   └── descriptions.txt        # 4 Black Friday descriptions
-│   ├── cyber_monday/
+│   │   ├── headlines.txt           # 15 headlines with RSA COUNTDOWN syntax
+│   │   └── descriptions.txt        # 4 descriptions with RSA COUNTDOWN syntax
+│   ├── cyber_monday/               # Countdown: 2025-12-01 00:00:00
 │   │   ├── headlines.txt
 │   │   └── descriptions.txt
-│   ├── sinterklaas/
+│   ├── sinterklaas/                # Countdown: 2025-12-05 00:00:00
 │   │   ├── headlines.txt
 │   │   └── descriptions.txt
-│   └── kerstmis/
+│   └── kerstmis/                   # Countdown: 2025-12-25 00:00:00
 │       ├── headlines.txt
 │       └── descriptions.txt
+│   # Note: All template files use RSA countdown format: {COUNTDOWN(yyyy-MM-dd HH:mm:ss,daysBefore)}
 ├── delete_sd_checked_labels.py     # Utility: Delete SD_CHECKED labels from all accounts
 ├── remove_singles_day_ads_batch.py # Utility: Remove SINGLES_DAY ads and SD_DONE labels
 ├── frontend/
@@ -212,4 +240,4 @@ theme_ads/
 ```
 
 ---
-_Last updated: 2025-10-09_
+_Last updated: 2025-10-17_

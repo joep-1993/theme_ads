@@ -14,6 +14,10 @@ cd thema_ads_optimized/
 ./docker-run.sh run            # Production run
 ./docker-run.sh logs           # View logs
 ./docker-run.sh clean          # Cleanup Docker resources
+
+# Database Operations
+docker-compose up -d           # Ensure containers are running
+docker-compose exec -T db psql -U postgres -d thema_ads -c "DELETE FROM thema_ads_jobs;"  # Delete all jobs (cascades to job_items)
 ```
 
 ## Common Issues & Solutions
@@ -222,6 +226,38 @@ response = label_service.mutate_labels(
 )
 ```
 - **Impact**: Labels created without descriptions; use clear label names instead
+
+### Google Ads RSA Countdown Syntax Incompatibility
+- **Error**: `The ad customizer syntax used in the ad is not supported` with 100% failure rate (0 successful, 6189 failures)
+- **Cause**: Incorrect countdown syntax format in RSA (Responsive Search Ad) templates
+- **Root Issue**: RSA countdown syntax differs from standard Google Ads countdown format
+- **Original Format (WRONG for RSAs)**: `{=COUNTDOWN("2025/11/28 00:00:00","nl")}`
+  - Uses `=` sign after opening brace
+  - Date with forward slashes
+  - Language parameter in quotes
+- **Correct RSA Format**: `{COUNTDOWN(2025-11-28 00:00:00,5)}`
+  - No `=` sign
+  - Date with dashes (ISO format)
+  - No quotes around parameters
+  - `daysBefore` parameter instead of language code
+- **Impact**: All ad creation operations failed until syntax was corrected
+- **Files Affected**: All theme template files
+  - `themes/black_friday/headlines.txt` and `descriptions.txt`
+  - `themes/cyber_monday/headlines.txt` and `descriptions.txt`
+  - `themes/sinterklaas/headlines.txt` and `descriptions.txt`
+  - `themes/kerstmis/headlines.txt` and `descriptions.txt`
+- **Solution**: Updated all 8 files with correct RSA countdown syntax
+```python
+# ❌ FAILS: Standard Google Ads countdown format in RSA
+headline = "Black Friday {=COUNTDOWN(\"2025/11/28 00:00:00\",\"nl\")}"
+
+# ✅ WORKS: RSA-specific countdown format
+headline = "Black Friday {COUNTDOWN(2025-11-28 00:00:00,5)}"
+# Parameters: (end_date_time, days_before_to_start_showing)
+```
+- **Note**: The `daysBefore` parameter (5 in example) controls when countdown starts showing
+- **Recovery**: After fixing syntax, deleted all failed jobs (13 jobs) and prepared for fresh run
+- **Session**: 2025-10-17
 
 ### Empty List Conditional Bug
 - **Error**: Operations silently skipped even though data exists
@@ -435,6 +471,32 @@ git config user.email "email@example.com"
 ```
 
 ## Project Patterns
+
+### Theme Template File Management
+- **Pattern**: Centralized theme content in structured text file directories for easy bulk updates
+- **Structure**: `themes/theme_name/headlines.txt` and `themes/theme_name/descriptions.txt`
+- **Benefit**: Bulk syntax/format changes across all themes in single session using parallel file operations
+- **Use Case**: Fixed RSA countdown syntax error across 4 themes (8 files total) in minutes
+- **Implementation**:
+```bash
+# Discover all theme files with pattern matching
+Glob: themes/**/headlines.txt
+Glob: themes/**/descriptions.txt
+
+# Apply bulk edits in parallel (example: fix countdown syntax)
+Edit: themes/black_friday/headlines.txt (replace old → new syntax)
+Edit: themes/black_friday/descriptions.txt
+Edit: themes/cyber_monday/headlines.txt
+Edit: themes/cyber_monday/descriptions.txt
+... (parallel operations)
+```
+- **Advantages**:
+  - Fast bulk updates (Glob to find files, Edit in parallel)
+  - No code changes needed for content updates
+  - Version control tracks content changes
+  - Easy to add new themes (copy directory structure)
+- **Content Management**: Non-technical users can edit text files to update ad copy
+- **Example Session**: 2025-10-17 - Fixed countdown syntax in 8 files across 4 themes
 
 ### Multi-Theme System Architecture
 - **Pattern**: Support multiple seasonal/event themes with per-ad-group theme assignment
@@ -1162,4 +1224,4 @@ for customer in customers:
   - **Customer-grouped label checks**: Still batch-check SD_DONE labels per customer for efficiency
 
 ---
-_Last updated: 2025-10-09_
+_Last updated: 2025-10-17_
