@@ -1,17 +1,128 @@
 // Global state
 let currentJobId = null;
 let pollInterval = null;
+let themes = [];
+
+// Format date to local timezone
+function formatDateTime(isoString) {
+    if (!isoString) return 'Not started';
+
+    const date = new Date(isoString);
+
+    // Format: DD-MM-YYYY HH:MM:SS
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const year = date.getFullYear();
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+
+    return `${day}-${month}-${year} ${hours}:${minutes}:${seconds}`;
+}
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
+    loadThemes();
+    loadQueueStatus();
     refreshJobs();
     // Auto-refresh jobs every 5 seconds
     setInterval(refreshJobs, 5000);
+    // Auto-refresh queue status every 10 seconds
+    setInterval(loadQueueStatus, 10000);
 });
+
+async function loadThemes() {
+    try {
+        const response = await fetch('/api/thema-ads/themes');
+        const data = await response.json();
+
+        if (response.ok && data.themes) {
+            themes = data.themes;
+
+            // Update supported themes display with accepted input formats
+            const themeAliases = {
+                'black_friday': ['black_friday', 'bf', 'black friday'],
+                'cyber_monday': ['cyber_monday', 'cm'],
+                'sinterklaas': ['sinterklaas', 'sint'],
+                'kerstmis': ['kerstmis', 'kerst', 'christmas', 'xmas'],
+                'singles_day': ['singles_day', 'sd', 'singles']
+            };
+            const themesText = themes.map(t => {
+                const aliases = themeAliases[t.name] || [t.name];
+                return `${t.display_name} (${aliases.join(', ')})`;
+            }).join(' | ');
+            const supportedThemesEl = document.getElementById('supportedThemes');
+            if (supportedThemesEl) {
+                supportedThemesEl.textContent = themesText;
+            }
+
+            // Populate theme dropdown for Auto-Discover
+            const themeSelect = document.getElementById('discoverTheme');
+            if (themeSelect) {
+                themeSelect.innerHTML = themes.map(t =>
+                    `<option value="${t.name}" ${t.name === 'singles_day' ? 'selected' : ''}>${t.display_name}</option>`
+                ).join('');
+            }
+
+            // Populate theme dropdown for CSV Upload
+            const csvThemeSelect = document.getElementById('csvTheme');
+            if (csvThemeSelect) {
+                csvThemeSelect.innerHTML = themes.map(t =>
+                    `<option value="${t.name}" ${t.name === 'singles_day' ? 'selected' : ''}>${t.display_name}</option>`
+                ).join('');
+            }
+        }
+    } catch (error) {
+        console.error('Error loading themes:', error);
+    }
+}
+
+async function uploadExcel() {
+    const fileInput = document.getElementById('excelFile');
+    const batchSize = document.getElementById('excelBatchSize').value;
+    const resultDiv = document.getElementById('excelUploadResult');
+
+    if (!fileInput.files.length) {
+        resultDiv.innerHTML = '<div class="alert alert-danger">Please select an Excel file</div>';
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', fileInput.files[0]);
+    formData.append('batch_size', batchSize);
+
+    resultDiv.innerHTML = '<div class="alert alert-info">Uploading...</div>';
+
+    try {
+        const response = await fetch('/api/thema-ads/upload-excel', {
+            method: 'POST',
+            body: formData
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            resultDiv.innerHTML = `
+                <div class="alert alert-success">
+                    <strong>Success!</strong> Job ${data.job_id} created with ${data.total_items} items.
+                    Processing started automatically.
+                </div>
+            `;
+            currentJobId = data.job_id;
+            startPolling(data.job_id);
+            fileInput.value = '';
+        } else {
+            resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.detail}</div>`;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
+    }
+}
 
 async function uploadCSV() {
     const fileInput = document.getElementById('csvFile');
     const batchSize = document.getElementById('csvBatchSize').value;
+    const theme = document.getElementById('csvTheme').value;
     const resultDiv = document.getElementById('uploadResult');
 
     if (!fileInput.files.length) {
@@ -19,9 +130,15 @@ async function uploadCSV() {
         return;
     }
 
+    if (!theme) {
+        resultDiv.innerHTML = '<div class="alert alert-danger">Please select a theme</div>';
+        return;
+    }
+
     const formData = new FormData();
     formData.append('file', fileInput.files[0]);
     formData.append('batch_size', batchSize);
+    formData.append('theme', theme);
 
     resultDiv.innerHTML = '<div class="alert alert-info">Uploading...</div>';
 
@@ -55,6 +172,7 @@ async function discoverAdGroups() {
     const limit = document.getElementById('discoverLimit').value;
     const batchSize = document.getElementById('discoverBatchSize').value;
     const jobChunkSize = document.getElementById('discoverJobChunkSize').value;
+    const theme = document.getElementById('discoverTheme').value;
     const resultDiv = document.getElementById('discoverResult');
     const btn = document.getElementById('discoverBtn');
 
@@ -62,13 +180,15 @@ async function discoverAdGroups() {
     resultDiv.innerHTML = '<div class="alert alert-info">Discovering ad groups...</div>';
 
     try {
-        const params = new URLSearchParams();
-        if (limit) params.append('limit', limit);
-        params.append('batch_size', batchSize);
-        params.append('job_chunk_size', jobChunkSize);
+        const formData = new FormData();
+        if (limit) formData.append('limit', limit);
+        formData.append('batch_size', batchSize);
+        formData.append('job_chunk_size', jobChunkSize);
+        formData.append('theme', theme);
 
-        const response = await fetch(`/api/thema-ads/discover?${params}`, {
-            method: 'POST'
+        const response = await fetch('/api/thema-ads/discover', {
+            method: 'POST',
+            body: formData
         });
 
         const data = await response.json();
@@ -121,8 +241,8 @@ async function refreshJobs() {
             return;
         }
 
-        let html = '<div class="table-responsive"><table class="table table-sm">';
-        html += '<thead><tr><th>Job ID</th><th>Status</th><th>Progress</th><th>Success</th><th>Failed</th><th>Skipped</th><th>Actions</th></tr></thead><tbody>';
+        let html = '<table class="table table-sm">';
+        html += '<thead><tr><th>Job ID</th><th>Theme</th><th>Status</th><th>Progress</th><th>Success</th><th>Failed</th><th>Skipped</th><th>Actions</th></tr></thead><tbody>';
 
         for (const job of data.jobs) {
             const progress = job.total_items > 0
@@ -131,9 +251,14 @@ async function refreshJobs() {
 
             const statusBadge = getStatusBadge(job.status);
 
+            // Get theme display name
+            const theme = themes.find(t => t.name === job.theme_name);
+            const themeDisplay = theme ? theme.display_name : (job.theme_name || 'Singles Day');
+
             html += `
                 <tr>
                     <td><a href="#" onclick="viewJob(${job.id}); return false;">#${job.id}</a></td>
+                    <td><span class="badge bg-secondary">${themeDisplay}</span></td>
                     <td>${statusBadge}</td>
                     <td>${progress}%</td>
                     <td class="text-success">${job.successful_items}</td>
@@ -144,14 +269,15 @@ async function refreshJobs() {
                         ${job.status === 'running' ? `<button class="btn btn-sm btn-warning" onclick="pauseJobById(${job.id})">Pause</button>` : ''}
                         ${job.status === 'paused' || job.status === 'failed' ? `<button class="btn btn-sm btn-info" onclick="resumeJobById(${job.id})">Resume</button>` : ''}
                         ${job.status === 'completed' || job.status === 'paused' ? `<button class="btn btn-sm btn-danger" onclick="deleteJobById(${job.id})">Delete</button>` : ''}
-                        ${job.successful_items > 0 ? `<a href="/api/thema-ads/jobs/${job.id}/successful-items-csv" class="btn btn-sm btn-success">Success CSV</a>` : ''}
-                        ${(job.failed_items > 0 || job.skipped_items > 0) ? `<a href="/api/thema-ads/jobs/${job.id}/failed-items-csv" class="btn btn-sm btn-secondary">Failed CSV</a>` : ''}
+                        <a href="/api/thema-ads/jobs/${job.id}/plan-csv" class="btn btn-sm btn-primary" title="Download uploaded plan">Plan CSV</a>
+                        ${job.successful_items > 0 ? `<a href="/api/thema-ads/jobs/${job.id}/successful-items-csv" class="btn btn-sm btn-success" title="Download successful items">Success CSV</a>` : ''}
+                        ${(job.failed_items > 0 || job.skipped_items > 0) ? `<a href="/api/thema-ads/jobs/${job.id}/failed-items-csv" class="btn btn-sm btn-secondary" title="Download failed/skipped items">Failed CSV</a>` : ''}
                     </td>
                 </tr>
             `;
         }
 
-        html += '</tbody></table></div>';
+        html += '</tbody></table>';
         jobsList.innerHTML = html;
 
     } catch (error) {
@@ -250,7 +376,7 @@ async function updateJobStatus(jobId) {
         document.getElementById('currentJobId').textContent = job.id;
         document.getElementById('jobStatus').textContent = job.status;
         document.getElementById('jobStatus').className = 'badge ' + getStatusClass(job.status);
-        document.getElementById('jobStarted').textContent = job.started_at || 'Not started';
+        document.getElementById('jobStarted').textContent = formatDateTime(job.started_at);
 
         // Update counts
         document.getElementById('totalItems').textContent = job.total_items;
@@ -383,5 +509,71 @@ async function runCheckup() {
         resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
     } finally {
         btn.disabled = false;
+    }
+}
+
+
+// Auto-Queue Management
+async function loadQueueStatus() {
+    try {
+        const response = await fetch('/api/thema-ads/queue/status');
+        const data = await response.json();
+
+        if (response.ok) {
+            const enabled = data.auto_queue_enabled;
+            const toggle = document.getElementById('autoQueueToggle');
+            const statusText = document.getElementById('queueStatusText');
+
+            // Update toggle
+            if (toggle) {
+                toggle.checked = enabled;
+            }
+
+            // Update status text
+            if (statusText) {
+                if (enabled) {
+                    statusText.innerHTML = '<span class="text-success">Enabled - Jobs will start automatically after current job completes (30s delay)</span>';
+                } else {
+                    statusText.innerHTML = '<span class="text-muted">Disabled - Jobs must be started manually</span>';
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error loading queue status:', error);
+    }
+}
+
+async function toggleAutoQueue() {
+    const toggle = document.getElementById('autoQueueToggle');
+    const enabled = toggle.checked;
+
+    try {
+        const endpoint = enabled ? '/api/thema-ads/queue/enable' : '/api/thema-ads/queue/disable';
+        const response = await fetch(endpoint, { method: 'POST' });
+        const data = await response.json();
+
+        if (response.ok) {
+            // Reload status to update UI
+            await loadQueueStatus();
+
+            // Show notification
+            const statusText = document.getElementById('queueStatusText');
+            if (statusText) {
+                const color = enabled ? 'success' : 'warning';
+                const message = enabled ? 'Auto-queue enabled!' : 'Auto-queue disabled';
+                statusText.innerHTML = `<span class="text-${color}"><strong>${message}</strong></span>`;
+
+                // Reload after 2 seconds to show normal status
+                setTimeout(loadQueueStatus, 2000);
+            }
+        } else {
+            // Revert toggle on error
+            toggle.checked = !enabled;
+            alert(`Failed to ${enabled ? 'enable' : 'disable'} auto-queue: ${data.detail}`);
+        }
+    } catch (error) {
+        // Revert toggle on error
+        toggle.checked = !enabled;
+        alert(`Error: ${error.message}`);
     }
 }

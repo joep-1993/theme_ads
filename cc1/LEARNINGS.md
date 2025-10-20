@@ -1223,5 +1223,52 @@ for customer in customers:
   - **In-memory deduplication**: Use dict/set to deduplicate ad groups (multiple ads per ad group)
   - **Customer-grouped label checks**: Still batch-check SD_DONE labels per customer for efficiency
 
+### Automatic Job Queue Implementation
+- **Feature**: FIFO queue automatically starts next pending job when current job completes
+- **Use Case**: Queue multiple discoveries/uploads, system processes unattended (overnight/weekend)
+- **Implementation Pattern**: AsyncIO + Database state persistence + UI toggle
+- **Key Components**:
+```python
+# Service: Auto-queue logic after job completion
+async def process_job(self, job_id):
+    try:
+        # ... process job ...
+        self.update_job_status(job_id, 'completed')
+        await self._start_next_job_if_queue_enabled()  # Auto-start next
+    except Exception as e:
+        self.update_job_status(job_id, 'failed')
+        await self._start_next_job_if_queue_enabled()  # Continue even if failed
+
+async def _start_next_job_if_queue_enabled(self):
+    await asyncio.sleep(30)  # Inter-job delay
+    if get_auto_queue_enabled():  # Check database state
+        next_job = self.get_next_pending_job()  # FIFO
+        if next_job:
+            await self.process_job(next_job)
+
+# Database: Persistent state
+system_settings table:
+  - setting_key VARCHAR(100) UNIQUE
+  - setting_value TEXT  # 'true' or 'false'
+  - updated_at TIMESTAMP
+
+# API: Toggle endpoints
+GET  /api/thema-ads/queue/status   # Get enabled state
+POST /api/thema-ads/queue/enable   # Enable queue
+POST /api/thema-ads/queue/disable  # Disable queue
+
+# Frontend: UI toggle with auto-refresh
+<input type="checkbox" id="autoQueueToggle" onchange="toggleAutoQueue()">
+setInterval(loadQueueStatus, 10000);  // Refresh every 10s
+```
+- **Design Decisions**:
+  - **30-second delay**: Gives time for API rate limits to reset between jobs
+  - **Failed job handling**: Queue continues (skip & continue pattern)
+  - **FIFO ordering**: Oldest job first (ORDER BY created_at ASC)
+  - **Persistent state**: Settings survive container restarts
+  - **Manual override**: Can disable at any time via UI toggle
+- **Benefits**: Unattended processing, reduced manual intervention, overnight job completion
+- **Example**: Queue 10 theme discoveries (Black Friday, Cyber Monday, etc.), enable queue, let system process all overnight
+
 ---
-_Last updated: 2025-10-17_
+_Last updated: 2025-10-20_

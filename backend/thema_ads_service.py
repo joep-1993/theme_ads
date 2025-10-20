@@ -225,43 +225,48 @@ class ThemaAdsService:
                           status: str, new_ad_resource: Optional[str] = None,
                           error_message: Optional[str] = None):
         """Update individual item status."""
-        conn = get_db_connection()
-        cur = conn.cursor()
-
         try:
-            cur.execute("""
-                UPDATE thema_ads_job_items
-                SET status = %s,
-                    new_ad_resource = %s,
-                    error_message = %s,
-                    processed_at = CURRENT_TIMESTAMP
-                WHERE job_id = %s AND customer_id = %s AND ad_group_id = %s
-            """, (status, new_ad_resource, error_message, job_id, customer_id, ad_group_id))
+            conn = get_db_connection()
+            cur = conn.cursor()
 
-            # Update job statistics
-            cur.execute("""
-                UPDATE thema_ads_jobs
-                SET processed_ad_groups = (
-                        SELECT COUNT(*) FROM thema_ads_job_items
-                        WHERE job_id = %s AND status IN ('successful', 'failed', 'skipped')
-                    ),
-                    successful_ad_groups = (
-                        SELECT COUNT(*) FROM thema_ads_job_items
-                        WHERE job_id = %s AND status = 'successful'
-                    ),
-                    failed_ad_groups = (
-                        SELECT COUNT(*) FROM thema_ads_job_items
-                        WHERE job_id = %s AND status = 'failed'
-                    ),
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-            """, (job_id, job_id, job_id, job_id))
+            try:
+                cur.execute("""
+                    UPDATE thema_ads_job_items
+                    SET status = %s,
+                        new_ad_resource = %s,
+                        error_message = %s,
+                        processed_at = CURRENT_TIMESTAMP
+                    WHERE job_id = %s AND customer_id = %s AND ad_group_id = %s
+                """, (status, new_ad_resource, error_message, job_id, customer_id, ad_group_id))
 
-            conn.commit()
+                # Update job statistics
+                cur.execute("""
+                    UPDATE thema_ads_jobs
+                    SET processed_ad_groups = (
+                            SELECT COUNT(*) FROM thema_ads_job_items
+                            WHERE job_id = %s AND status IN ('successful', 'failed', 'skipped')
+                        ),
+                        successful_ad_groups = (
+                            SELECT COUNT(*) FROM thema_ads_job_items
+                            WHERE job_id = %s AND status = 'successful'
+                        ),
+                        failed_ad_groups = (
+                            SELECT COUNT(*) FROM thema_ads_job_items
+                            WHERE job_id = %s AND status = 'failed'
+                        ),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (job_id, job_id, job_id, job_id))
 
-        finally:
-            cur.close()
-            conn.close()
+                conn.commit()
+                logger.info(f"✓ DB UPDATE: Job {job_id}, Ad Group {ad_group_id}: {status}")
+
+            finally:
+                cur.close()
+                conn.close()
+        except Exception as e:
+            logger.error(f"Failed to update item status for job {job_id}, ad_group {ad_group_id}: {e}")
+            raise
 
     async def process_job(self, job_id: int):
         """Process a job with state persistence."""
@@ -353,11 +358,17 @@ class ThemaAdsService:
 
             logger.info(f"Job {job_id} completed")
 
+            # Check if auto-queue is enabled and start next job
+            await self._start_next_job_if_queue_enabled()
+
         except Exception as e:
             logger.error(f"Job {job_id} failed: {e}", exc_info=True)
             self.update_job_status(job_id, 'failed', error_message=str(e))
             self.is_running = False
             self.current_job_id = None
+
+            # Even if job failed, try to start next job if auto-queue enabled
+            await self._start_next_job_if_queue_enabled()
 
     async def _process_with_tracking(self, processor, inputs, job_id):
         """Process inputs with progress tracking."""
@@ -373,32 +384,41 @@ class ThemaAdsService:
 
         async def process_with_tracking(customer_id, customer_inputs):
             async with semaphore:
-                results = await processor.process_customer(customer_id, customer_inputs)
+                try:
+                    logger.info(f"🔵 START processing customer {customer_id} with {len(customer_inputs)} inputs")
+                    results = await processor.process_customer(customer_id, customer_inputs)
+                    logger.info(f"🟢 FINISHED processor.process_customer for {customer_id}, got {len(results)} results")
 
-                # Update database with results
-                for result, inp in zip(results, customer_inputs):
-                    # Determine status based on result
-                    if result.success and result.error and "Already processed" in result.error:
-                        # Ad group already has SD_DONE label
-                        status = 'skipped'
-                    elif not result.success and result.error and "No existing ad" in result.error:
-                        # Ad group has no existing ads to work with (not a failure, just can't process)
-                        status = 'skipped'
-                    elif result.success:
-                        status = 'successful'
-                    else:
-                        status = 'failed'
+                    # Update database with results
+                    logger.info(f"Processing {len(results)} results for customer {customer_id}")
+                    for result, inp in zip(results, customer_inputs):
+                        # Determine status based on result
+                        if result.success and result.error and "Already processed" in result.error:
+                            # Ad group already has SD_DONE label
+                            status = 'skipped'
+                        elif not result.success and result.error and "No existing ad" in result.error:
+                            # Ad group has no existing ads to work with (not a failure, just can't process)
+                            status = 'skipped'
+                        elif result.success:
+                            status = 'successful'
+                        else:
+                            status = 'failed'
 
-                    self.update_item_status(
-                        job_id,
-                        customer_id,
-                        inp.ad_group_id,
-                        status,
-                        result.new_ad_resource if result.success else None,
-                        result.error
-                    )
+                        logger.info(f"About to update DB for ad_group {inp.ad_group_id}: {status}")
+                        self.update_item_status(
+                            job_id,
+                            customer_id,
+                            inp.ad_group_id,
+                            status,
+                            result.new_ad_resource if result.success else None,
+                            result.error
+                        )
+                        logger.info(f"DB update completed for ad_group {inp.ad_group_id}")
 
-                return results
+                    return results
+                except Exception as e:
+                    logger.error(f"🔴 ERROR in process_with_tracking for customer {customer_id}: {e}", exc_info=True)
+                    raise
 
         tasks = [
             process_with_tracking(cid, inputs_list)
@@ -739,6 +759,49 @@ class ThemaAdsService:
             'stats': stats,
             'repair_job_ids': job_ids
         }
+
+    def get_next_pending_job(self) -> Optional[int]:
+        """Get the oldest pending job (FIFO)."""
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        try:
+            cur.execute("""
+                SELECT id FROM thema_ads_jobs
+                WHERE status = 'pending'
+                ORDER BY created_at ASC
+                LIMIT 1
+            """)
+
+            result = cur.fetchone()
+            return result['id'] if result else None
+
+        finally:
+            cur.close()
+            conn.close()
+
+    async def _start_next_job_if_queue_enabled(self):
+        """Check if auto-queue is enabled and start the next pending job."""
+        from backend.database import get_auto_queue_enabled
+
+        # Wait 30 seconds before checking for next job
+        logger.info("Waiting 30 seconds before checking for next job...")
+        await asyncio.sleep(30)
+
+        # Check if auto-queue is enabled
+        queue_enabled = get_auto_queue_enabled()
+        if not queue_enabled:
+            logger.info("Auto-queue is disabled, not starting next job")
+            return
+
+        # Get next pending job
+        next_job_id = self.get_next_pending_job()
+        if next_job_id is None:
+            logger.info("No pending jobs in queue")
+            return
+
+        logger.info(f"Auto-queue: Starting next pending job {next_job_id}")
+        await self.process_job(next_job_id)
 
 
 # Global service instance

@@ -1,13 +1,67 @@
 import os
 import psycopg2
+from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Global connection pool (initialized on first use)
+_connection_pool = None
+
+
+def _init_pool():
+    """Initialize the connection pool."""
+    global _connection_pool
+    if _connection_pool is None:
+        database_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/myapp")
+        try:
+            _connection_pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=2,  # Minimum connections in pool
+                maxconn=20,  # Maximum connections in pool
+                dsn=database_url,
+                cursor_factory=RealDictCursor
+            )
+            logger.info("Database connection pool initialized (2-20 connections)")
+        except Exception as e:
+            logger.error(f"Failed to create connection pool: {e}")
+            raise
+    return _connection_pool
+
 
 def get_db_connection():
-    """Simple database connection for small apps"""
+    """
+    Get a database connection from the pool.
+
+    IMPORTANT: The pool was causing issues with high concurrency.
+    Temporarily reverting to direct connections until we can properly
+    implement connection pooling with proper lifecycle management.
+
+    Returns a connection that should be closed when done:
+        conn = get_db_connection()
+        try:
+            # Use connection
+        finally:
+            conn.close()
+    """
+    # Temporarily disable pooling - it was causing exhaustion issues
+    # The pool needs proper connection lifecycle management across async operations
     return psycopg2.connect(
         os.getenv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/myapp"),
         cursor_factory=RealDictCursor
     )
+
+
+def return_db_connection(conn):
+    """
+    Return a connection to the pool (optional, close() also works).
+
+    Args:
+        conn: Connection to return to pool
+    """
+    # No-op now that pooling is disabled
+    if conn and not conn.closed:
+        conn.close()
 
 def init_db():
     """Initialize database tables"""
@@ -114,10 +168,71 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_input_data_job_id ON thema_ads_input_data(job_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON thema_ads_jobs(status)")
 
+    # System settings table for queue state
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS system_settings (
+            id SERIAL PRIMARY KEY,
+            setting_key VARCHAR(100) UNIQUE NOT NULL,
+            setting_value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_system_settings_key ON system_settings(setting_key)")
+
+    # Insert default auto_queue_enabled setting
+    cur.execute("""
+        INSERT INTO system_settings (setting_key, setting_value)
+        VALUES ('auto_queue_enabled', 'false')
+        ON CONFLICT (setting_key) DO NOTHING
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
     print("Database initialized with SEO workflow and Thema Ads tables")
+
+def get_auto_queue_enabled():
+    """Get the auto-queue enabled state from database."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            SELECT setting_value FROM system_settings
+            WHERE setting_key = 'auto_queue_enabled'
+        """)
+        result = cur.fetchone()
+
+        if result:
+            return result['setting_value'].lower() == 'true'
+        return False  # Default to disabled
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+def set_auto_queue_enabled(enabled: bool):
+    """Set the auto-queue enabled state in database."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            INSERT INTO system_settings (setting_key, setting_value, updated_at)
+            VALUES ('auto_queue_enabled', %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (setting_key)
+            DO UPDATE SET setting_value = EXCLUDED.setting_value,
+                         updated_at = CURRENT_TIMESTAMP
+        """, ('true' if enabled else 'false',))
+
+        conn.commit()
+        logger.info(f"Auto-queue {'enabled' if enabled else 'disabled'}")
+
+    finally:
+        cur.close()
+        conn.close()
+
 
 if __name__ == "__main__":
     init_db()

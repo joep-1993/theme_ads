@@ -11,17 +11,24 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - **Quality Assurance**: Check-up function audits processed ad groups, verifies ad integrity, creates repair jobs
 
 ### Key Components
-- `backend/main.py` - FastAPI API endpoints (CSV upload, Excel upload, auto-discovery, checkup)
+- `backend/main.py` - FastAPI API endpoints (CSV upload, Excel upload, auto-discovery, checkup, queue management)
   - `/api/thema-ads/upload` - CSV upload and job creation (legacy, defaults to singles_day theme)
   - `/api/thema-ads/upload-excel` - Excel upload with theme column support
   - `/api/thema-ads/discover` - Auto-discover ad groups from MCC (with theme parameter)
   - `/api/thema-ads/themes` - Get list of supported themes
   - `/api/thema-ads/checkup` - Audit processed ad groups, verify theme ads exist (multi-theme aware)
+  - `/api/thema-ads/queue/status` - Get auto-queue enabled state
+  - `/api/thema-ads/queue/enable` - Enable automatic job queue
+  - `/api/thema-ads/queue/disable` - Disable automatic job queue
 - `backend/thema_ads_service.py` - Business logic and job processing
   - `checkup_ad_groups()` - Database-driven multi-theme checkup: queries job_items for theme_name, checks theme-specific labels (THEME_BF, THEME_CM, etc.), creates repair jobs with correct theme
-- `backend/database.py` - Database connection management
-- `frontend/thema-ads.html` - Web UI with 3 tabs (Excel Upload, CSV Upload, Auto-Discover, Check-up)
-- `frontend/js/thema-ads.js` - Frontend logic including uploadExcel(), runCheckup(), theme loading
+  - `get_next_pending_job()` - Returns oldest pending job ID (FIFO)
+  - `_start_next_job_if_queue_enabled()` - Auto-queue logic: waits 30s, checks queue state, starts next job
+- `backend/database.py` - Database connection management, auto-queue state persistence
+  - `get_auto_queue_enabled()` - Retrieve queue toggle state from database
+  - `set_auto_queue_enabled(bool)` - Persist queue toggle state
+- `frontend/thema-ads.html` - Web UI with 3 tabs (Excel Upload, CSV Upload, Auto-Discover, Check-up) and auto-queue toggle
+- `frontend/js/thema-ads.js` - Frontend logic including uploadExcel(), runCheckup(), theme loading, auto-queue toggle (loadQueueStatus(), toggleAutoQueue())
 - `themes/` - Theme content directory (black_friday/, cyber_monday/, sinterklaas/, kerstmis/)
   - Each theme has headlines.txt and descriptions.txt files
 - `thema_ads_optimized/themes.py` - Theme management module (load content, get labels, validate themes)
@@ -85,9 +92,15 @@ _Technical reference for the project. Update when: architecture changes, new pat
      - Database: `thema_ads_jobs.is_repair_job BOOLEAN DEFAULT FALSE`
      - Processor: `ThemaAdsProcessor(config, skip_sd_done_check=is_repair_job)`
      - Allows reprocessing of items that already have SD_DONE label
-4. **State Persistence** - PostgreSQL tracks job and item status for resume capability
-5. **Background Tasks** - FastAPI BackgroundTasks for long-running jobs
-6. **Error Handling** - Distinguish between failed, skipped, and successful items
+4. **Automatic Job Queue** - FIFO queue for unattended processing
+   - Toggle state stored in `system_settings` table (survives restarts)
+   - When enabled: Jobs auto-start after current job completes (30s delay)
+   - Failed job handling: Queue continues even if jobs fail
+   - Manual control: UI toggle switch in job management section
+   - Use case: Queue multiple discoveries/uploads, let system process overnight
+5. **State Persistence** - PostgreSQL tracks job and item status for resume capability
+6. **Background Tasks** - FastAPI BackgroundTasks for long-running jobs
+7. **Error Handling** - Distinguish between failed, skipped, and successful items
 
 ### API Integration
 1. **Configurable Batch Size** - User-adjustable (1000-10000, default: 5000) for rate limiting or performance
@@ -101,6 +114,10 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - `thema_ads_jobs.theme_name` VARCHAR(50) - Default theme for job (optional, can be NULL for mixed-theme jobs)
 - `thema_ads_job_items.theme_name` VARCHAR(50) - Theme for specific ad group
 - `thema_ads_input_data.theme_name` VARCHAR(50) - Theme from original upload
+- `system_settings` table - Store system-wide configuration (auto-queue state)
+  - `setting_key` VARCHAR(100) UNIQUE - Setting identifier (e.g., 'auto_queue_enabled')
+  - `setting_value` TEXT - Setting value (e.g., 'true' or 'false')
+  - `updated_at` TIMESTAMP - Last modification time
 - `theme_configs` table - Store active theme configuration per customer (future use)
   - `customer_id` VARCHAR(50) UNIQUE - Customer account ID
   - `theme_name` VARCHAR(50) - Active theme for customer

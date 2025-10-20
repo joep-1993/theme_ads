@@ -1098,6 +1098,42 @@ async def delete_job(job_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/thema-ads/queue/status")
+async def get_queue_status():
+    """Get the current auto-queue status."""
+    try:
+        from backend.database import get_auto_queue_enabled
+        enabled = get_auto_queue_enabled()
+        return {"auto_queue_enabled": enabled}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/thema-ads/queue/enable")
+async def enable_queue():
+    """Enable automatic job queue."""
+    try:
+        from backend.database import set_auto_queue_enabled
+        set_auto_queue_enabled(True)
+        return {"status": "enabled", "auto_queue_enabled": True}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/thema-ads/queue/disable")
+async def disable_queue():
+    """Disable automatic job queue."""
+    try:
+        from backend.database import set_auto_queue_enabled
+        set_auto_queue_enabled(False)
+        return {"status": "disabled", "auto_queue_enabled": False}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/thema-ads/jobs/{job_id}/failed-items-csv")
 async def download_failed_items(job_id: int):
     """Download CSV of failed and skipped items for a job."""
