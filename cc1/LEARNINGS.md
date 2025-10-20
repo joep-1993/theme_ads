@@ -22,6 +22,59 @@ docker-compose exec -T db psql -U postgres -d thema_ads -c "DELETE FROM thema_ad
 
 ## Common Issues & Solutions
 
+### Container Auto-Reload Killing Long-Running Jobs (2025-10-20)
+- **Problem**: Uvicorn's `--reload` flag watches for file changes and restarts the container, killing long-running background jobs mid-process
+- **Impact**: Job 213 stopped at 43.2% (21,595/50,000 items) when we edited code, remained in "running" state but was actually dead
+- **Root Cause**: Development mode (`--reload`) running in production environment
+- **Timeline**:
+  - 14:03 - Job started
+  - 14:30 - Code edited (added auto-queue feature)
+  - 14:30 - Container auto-reloaded, killed job
+  - 14:30-16:00 - Job showed "running" but was dead
+- **Error Log**:
+```
+WARNING: WatchFiles detected changes in 'backend/database.py'. Reloading...
+ERROR: Cancel 1 running task(s), timeout graceful shutdown exceeded
+asyncio.exceptions.CancelledError: Task cancelled
+```
+- **Solution**:
+  1. Disable auto-reload in production
+     - Remove `--reload` from `docker-compose.yml` command
+     - Remove `--reload` from `Dockerfile` CMD
+  2. Add startup job cleanup handler
+     - `@app.on_event("startup")` marks stale "running" jobs as failed
+     - Prevents false "running" status after container restart
+- **Files Modified**: `Dockerfile`, `docker-compose.yml`, `backend/main.py`
+- **Documentation**: See `JOB_STALL_ROOT_CAUSE_AND_FIX.md` for detailed analysis
+
+### Rate Limiter Incorrectly Triggered by Policy Violations (2025-10-20)
+- **Problem**: Google Ads policy violations (PROHIBITED content) were triggering rate limiting, causing unnecessary 15-second delays
+- **Impact**: Jobs slowed down significantly despite no actual API rate limiting
+- **Root Cause**: Rate limiter treated ALL batch failures as rate limit issues without checking error type
+- **Behavior**: When one ad in a 100-ad batch had policy violations, entire batch failed → rate limiter increased delays
+- **Solution**: Added error type detection in `operations/ads.py`
+```python
+# Check error type before triggering rate limiter
+is_policy_violation = any(
+    "PROHIBITED" in msg or "policy" in msg.lower() or "disapproved" in msg.lower()
+    for msg in error_messages
+)
+is_rate_limit = any(
+    "RATE_EXCEEDED" in msg or "RESOURCE_EXHAUSTED" in msg or "503" in msg
+    for msg in error_messages
+)
+
+if is_rate_limit:
+    _rate_limiter.on_error("rate_limit")  # Increase delay
+elif is_policy_violation:
+    # Don't trigger rate limiting for policy violations
+    logger.info("Policy violation detected, NOT increasing delay")
+else:
+    _rate_limiter.on_error("batch_failure")  # Unknown error, be safe
+```
+- **Result**: Policy violations no longer slow down processing, only actual rate limits trigger delays
+- **File Modified**: `thema_ads_optimized/operations/ads.py`
+
 ### Google Ads API Invalid Enum Value 'REMOVED'
 - **Error**: `error_code { request_error: INVALID_ENUM_VALUE } message: "Enum value 'REMOVED' cannot be used."`
 - **Cause**: Attempting to set ad status to REMOVED using update operation
