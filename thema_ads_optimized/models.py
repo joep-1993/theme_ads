@@ -12,6 +12,7 @@ class AdGroupInput:
     campaign_id: str
     ad_group_id: str
     ad_group_name: Optional[str] = None  # If provided, use for lookup instead of ID (Excel precision issue)
+    theme_name: str = "singles_day"  # Theme to apply to this ad group
 
 
 @dataclass

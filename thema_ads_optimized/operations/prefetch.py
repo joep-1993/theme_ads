@@ -119,38 +119,50 @@ async def prefetch_ad_group_labels(
     client: GoogleAdsClient,
     customer_id: str,
     ad_group_resources: List[str],
-    label_name: str = "SD_DONE",
+    label_names: List[str] = None,
     batch_size: int = 7500
-) -> Dict[str, bool]:
-    """Check which ad groups have a specific label. Returns {ad_group_resource: has_label}."""
+) -> Dict[str, set]:
+    """Check which DONE labels each ad group has. Returns {ad_group_resource: set_of_label_names}."""
 
     def _fetch():
         if not ad_group_resources:
             return {}
 
         ga_service = client.get_service("GoogleAdsService")
-        ag_labels_map = {ag_res: False for ag_res in ad_group_resources}
+        # Initialize with empty sets
+        ag_labels_map = {ag_res: set() for ag_res in ad_group_resources}
 
-        # First get the label resource for SD_DONE
-        label_query = f"""
-            SELECT label.resource_name, label.name
-            FROM label
-            WHERE label.name = '{label_name}'
-        """
-        sd_done_resource = None
-        try:
-            label_search = ga_service.search(customer_id=customer_id, query=label_query)
-            for row in label_search:
-                sd_done_resource = row.label.resource_name
-                break
-        except Exception:
-            pass
+        # Get all label resources we care about (all DONE labels)
+        labels_to_check = label_names
+        if not labels_to_check:
+            # Default to checking all theme DONE labels
+            from themes import get_all_theme_labels
+            theme_labels = get_all_theme_labels()
+            labels_to_check = [f"{label}_DONE" for label in theme_labels]
 
-        if not sd_done_resource:
-            logger.info(f"Label {label_name} doesn't exist yet, no ad groups to skip")
+        label_resources_map = {}  # label_name -> resource_name
+        for label_name in labels_to_check:
+            label_query = f"""
+                SELECT label.resource_name, label.name
+                FROM label
+                WHERE label.name = '{label_name}'
+            """
+            try:
+                label_search = ga_service.search(customer_id=customer_id, query=label_query)
+                for row in label_search:
+                    label_resources_map[label_name] = row.label.resource_name
+                    break
+            except Exception:
+                pass
+
+        if not label_resources_map:
+            logger.info(f"No DONE labels exist yet for customer {customer_id}")
             return ag_labels_map
 
-        # Use dynamic batch size
+        # Reverse map: resource -> name
+        resource_to_name = {v: k for k, v in label_resources_map.items()}
+
+        # Query all ad_group_label associations in batches
         try:
             for i in range(0, len(ad_group_resources), batch_size):
                 batch = ad_group_resources[i:i + batch_size]
@@ -167,11 +179,14 @@ async def prefetch_ad_group_labels(
                 response = ga_service.search(customer_id=customer_id, query=query)
 
                 for row in response:
-                    if row.ad_group_label.label == sd_done_resource:
-                        ag_labels_map[row.ad_group_label.ad_group] = True
+                    label_resource = row.ad_group_label.label
+                    # Check if this is one of the DONE labels we care about
+                    if label_resource in resource_to_name:
+                        label_name = resource_to_name[label_resource]
+                        ag_labels_map[row.ad_group_label.ad_group].add(label_name)
 
-            has_label_count = sum(1 for v in ag_labels_map.values() if v)
-            logger.info(f"Found {has_label_count} ad groups with {label_name} label (checked in {len(ad_group_resources)//batch_size + 1} batches)")
+            total_with_labels = sum(1 for labels in ag_labels_map.values() if labels)
+            logger.info(f"Found {total_with_labels} ad groups with DONE labels (checked in {len(ad_group_resources)//batch_size + 1} batches)")
 
         except Exception as e:
             logger.warning(f"Failed to check ad group labels: {e}")
@@ -195,9 +210,9 @@ async def prefetch_customer_data(
     # Fetch labels, ads, and ad group labels in parallel
     labels_task = prefetch_labels(client, customer_id)
     ads_task = prefetch_existing_ads_bulk(client, customer_id, ad_group_resources, batch_size=batch_size)
-    ag_labels_task = prefetch_ad_group_labels(client, customer_id, ad_group_resources, "SD_DONE", batch_size=batch_size)
+    ag_labels_task = prefetch_ad_group_labels(client, customer_id, ad_group_resources, batch_size=batch_size)
 
-    labels, existing_ads, ag_has_sd_done = await asyncio.gather(labels_task, ads_task, ag_labels_task)
+    labels, existing_ads, ag_done_labels = await asyncio.gather(labels_task, ads_task, ag_labels_task)
 
     logger.info(
         f"Prefetch complete for {customer_id}: "
@@ -208,5 +223,5 @@ async def prefetch_customer_data(
         labels=labels,
         existing_ads=existing_ads,
         campaigns={},  # Not needed for this use case
-        ad_group_labels=ag_has_sd_done  # Add this field
+        ad_group_labels=ag_done_labels  # Map of ad_group_resource -> set of DONE label names
     )

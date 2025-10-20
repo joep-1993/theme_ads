@@ -25,6 +25,36 @@ except ImportError:
 
 app = FastAPI(title="Theme Ads - Google Ads Automation", version="1.0.0")
 
+@app.on_event("startup")
+async def cleanup_stale_jobs():
+    """Clean up stale 'running' jobs on startup (jobs interrupted by container restart)."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        logger.info("Checking for stale running jobs...")
+        jobs = thema_ads_service.list_jobs(limit=100)
+
+        stale_count = 0
+        for job in jobs:
+            if job['status'] == 'running':
+                # Mark as failed since it was interrupted
+                logger.warning(f"Found stale running job {job['id']}, marking as failed")
+                thema_ads_service.update_job_status(
+                    job['id'],
+                    'failed',
+                    error_message='Job interrupted by container restart'
+                )
+                stale_count += 1
+
+        if stale_count > 0:
+            logger.info(f"Cleaned up {stale_count} stale running jobs")
+        else:
+            logger.info("No stale running jobs found")
+
+    except Exception as e:
+        logger.error(f"Error cleaning up stale jobs: {e}")
+
 # Mount static files
 frontend_dir = Path(__file__).parent.parent / "frontend"
 app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")

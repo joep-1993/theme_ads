@@ -1,6 +1,13 @@
 """Template generators for headlines and descriptions."""
 
 from typing import List
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from themes import load_theme_content, is_valid_theme
 
 
 def generate_singles_day_headlines(base_headlines: List[str]) -> List[str]:
@@ -77,6 +84,21 @@ def generate_themed_content(
     """
     theme = theme.lower()
 
+    # Use new theme system if available
+    if is_valid_theme(theme):
+        try:
+            theme_content = load_theme_content(theme)
+            return (
+                theme_content.headlines,
+                theme_content.descriptions,
+                theme.replace('_', ' ').lower()
+            )
+        except Exception as e:
+            import logging
+            logging.error(f"Failed to load theme content for '{theme}': {e}")
+            # Fall back to hardcoded content below
+
+    # Legacy fallback for old themes
     if theme == "singles_day":
         return (
             generate_singles_day_headlines(base_headlines),
@@ -90,7 +112,7 @@ def generate_themed_content(
             "black_friday"
         )
     else:
-        # Default/generic
+        # Default/generic - use base content
         return (
             base_headlines,
             [base_description] if base_description else [],

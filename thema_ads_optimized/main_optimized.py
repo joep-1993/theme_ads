@@ -28,6 +28,7 @@ from operations.prefetch import prefetch_customer_data
 from operations.labels import ensure_labels_exist, label_ads_batch, label_ad_groups_batch
 from operations.ads import create_rsa_batch, build_ad_data
 from templates.generators import generate_themed_content
+from themes import get_theme_label, get_all_theme_labels
 
 
 # Configure logging
@@ -48,11 +49,17 @@ class ThemaAdsProcessor:
     def __init__(self, config, batch_size: int = 5000, skip_sd_done_check: bool = False):
         self.config = config
         self.client = initialize_client(config.google_ads)
-        self.theme = "singles_day"  # Configurable
-        self.label_names = ["SINGLES_DAY", "THEMA_AD", "THEMA_ORIGINAL", "BF_2025", "SD_DONE"]
+        self.theme = "singles_day"  # Default theme (legacy)
+        # Get all theme labels dynamically + standard labels
+        theme_labels = get_all_theme_labels()
+        # Generate DONE labels for each theme
+        done_labels = [f"{label}_DONE" for label in theme_labels]
+        self.label_names = theme_labels + done_labels + ["THEMA_AD", "THEMA_ORIGINAL"]
         self.batch_size = batch_size
         self.skip_sd_done_check = skip_sd_done_check
         logger.info(f"Initialized ThemaAdsProcessor with batch_size={batch_size}, skip_sd_done_check={skip_sd_done_check}")
+        logger.info(f"Theme labels: {theme_labels}")
+        logger.info(f"DONE labels: {done_labels}")
 
     async def process_all(self, inputs: List[AdGroupInput]) -> List[ProcessingResult]:
         """Process all ad groups with maximum parallelization."""
@@ -109,6 +116,9 @@ class ThemaAdsProcessor:
     ) -> List[AdGroupInput]:
         """Resolve ad_group_id from ad_group_name when name is provided.
         Excel scientific notation corrupts IDs, so we look up correct IDs by name.
+
+        Optimized: Pre-fetches ALL ad group IDs in a single query for the entire customer,
+        then uses dictionary lookup instead of repeated queries.
         """
         # Separate inputs that need lookup vs those that don't
         inputs_needing_lookup = [inp for inp in inputs if inp.ad_group_name]
@@ -117,53 +127,57 @@ class ThemaAdsProcessor:
         if not inputs_needing_lookup:
             return inputs  # No lookups needed
 
-        def _lookup():
-            """Lookup ad group IDs by name in a single batched query."""
-            ga_service = self.client.get_service("GoogleAdsService")
+        # Optimization: Pre-fetch all ad group ID mappings for this customer
+        async def _prefetch_all_ad_groups():
+            """Pre-fetch ALL ad group IDs for this customer in one query."""
+            def _fetch():
+                ga_service = self.client.get_service("GoogleAdsService")
 
-            # Build name filter
-            names = [inp.ad_group_name for inp in inputs_needing_lookup]
-            names_str = ", ".join(f"'{name}'" for name in set(names))
+                # Query ALL ad groups for this customer (no filter)
+                # This is faster than multiple filtered queries
+                query = """
+                    SELECT ad_group.id, ad_group.name
+                    FROM ad_group
+                """
 
-            # Query ad groups by name
-            query = f"""
-                SELECT ad_group.id, ad_group.name
-                FROM ad_group
-                WHERE ad_group.name IN ({names_str})
-            """
+                try:
+                    response = ga_service.search(customer_id=customer_id, query=query)
+                    name_to_id = {row.ad_group.name: str(row.ad_group.id) for row in response}
+                    logger.info(f"Pre-fetched {len(name_to_id)} ad group IDs for customer {customer_id}")
+                    return name_to_id
+                except Exception as e:
+                    logger.error(f"Failed to pre-fetch ad group IDs: {e}")
+                    return {}
 
-            try:
-                response = ga_service.search(customer_id=customer_id, query=query)
-                name_to_id = {row.ad_group.name: str(row.ad_group.id) for row in response}
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, _fetch)
 
-                logger.info(f"Resolved {len(name_to_id)} ad group IDs from names for customer {customer_id}")
+        # Pre-fetch all ad group mappings
+        name_to_id = await _prefetch_all_ad_groups()
 
-                # Update inputs with correct IDs
-                corrected_inputs = []
-                for inp in inputs_needing_lookup:
-                    if inp.ad_group_name in name_to_id:
-                        # Create new input with correct ID
-                        corrected_inp = AdGroupInput(
-                            customer_id=inp.customer_id,
-                            campaign_name=inp.campaign_name,
-                            campaign_id=inp.campaign_id,
-                            ad_group_id=name_to_id[inp.ad_group_name],
-                            ad_group_name=inp.ad_group_name
-                        )
-                        corrected_inputs.append(corrected_inp)
-                    else:
-                        logger.warning(f"Could not find ad group '{inp.ad_group_name}' for customer {customer_id}")
-                        corrected_inputs.append(inp)  # Use original (will likely fail)
+        if not name_to_id:
+            logger.warning(f"No ad groups found for customer {customer_id}")
+            return inputs_ready + inputs_needing_lookup
 
-                return corrected_inputs
+        # Fast dictionary lookup for all inputs
+        corrected_inputs = []
+        for inp in inputs_needing_lookup:
+            if inp.ad_group_name in name_to_id:
+                # Create new input with correct ID
+                corrected_inp = AdGroupInput(
+                    customer_id=inp.customer_id,
+                    campaign_name=inp.campaign_name,
+                    campaign_id=inp.campaign_id,
+                    ad_group_id=name_to_id[inp.ad_group_name],
+                    ad_group_name=inp.ad_group_name,
+                    theme_name=inp.theme_name
+                )
+                corrected_inputs.append(corrected_inp)
+            else:
+                logger.warning(f"Could not find ad group '{inp.ad_group_name}' for customer {customer_id}")
+                corrected_inputs.append(inp)  # Use original (will likely fail)
 
-            except Exception as e:
-                logger.error(f"Failed to resolve ad group names: {e}")
-                return inputs_needing_lookup  # Return original inputs
-
-        # Run lookup in executor
-        loop = asyncio.get_event_loop()
-        corrected_inputs = await loop.run_in_executor(None, _lookup)
+        logger.info(f"Resolved {len(corrected_inputs)}/{len(inputs_needing_lookup)} ad group IDs from names")
 
         # Combine corrected and ready inputs
         return corrected_inputs + inputs_ready
@@ -204,6 +218,15 @@ class ThemaAdsProcessor:
                 cached_data.labels
             )
 
+            # Step 2.5: Auto-remove old theme ads when switching themes
+            await self._remove_conflicting_theme_ads(
+                customer_id,
+                inputs,
+                ad_group_resources,
+                cached_data,
+                labels
+            )
+
             # Step 3: Build operations in memory (no API calls)
             ad_operations = []
             label_operations_ads = []
@@ -215,11 +238,14 @@ class ThemaAdsProcessor:
             failed_inputs = []  # Track inputs that failed pre-checks
 
             for inp, ag_resource in zip(inputs, ad_group_resources):
-                # Skip ad groups that already have SD_DONE label (unless this is a repair job)
-                if not self.skip_sd_done_check and cached_data.ad_group_labels and cached_data.ad_group_labels.get(ag_resource, False):
-                    logger.info(f"Skipping ad group {inp.ad_group_id} - already has SD_DONE label")
-                    skipped_ags.append(inp)
-                    continue
+                # Skip ad groups that already have this theme's DONE label (unless this is a repair job)
+                if not self.skip_sd_done_check and cached_data.ad_group_labels:
+                    theme_label = get_theme_label(inp.theme_name)
+                    done_label_name = f"{theme_label}_DONE"
+                    if done_label_name in cached_data.ad_group_labels.get(ag_resource, set()):
+                        logger.info(f"Skipping ad group {inp.ad_group_id} - already has {done_label_name} label")
+                        skipped_ags.append(inp)
+                        continue
 
                 result = self._build_operations_for_ad_group(
                     inp,
@@ -241,7 +267,7 @@ class ThemaAdsProcessor:
                     failed_inputs.append(inp)
 
             if skipped_ags:
-                logger.info(f"Skipped {len(skipped_ags)} ad groups that already have SD_DONE label")
+                logger.info(f"Skipped {len(skipped_ags)} ad groups that already have theme-specific DONE labels")
 
             logger.info(
                 f"Customer {customer_id}: Prepared {len(ad_operations)} ads, "
@@ -285,14 +311,18 @@ class ThemaAdsProcessor:
                     [(ad, labels["THEMA_ORIGINAL"]) for ad in old_ads_to_label]
                 )
 
-            # Label new ads
+            # Label new ads with their respective theme labels
             if new_ad_resources:
-                # Map label operations to new ad resources
+                # Build label operations with correct theme labels
                 new_label_ops = []
-                for ad_res in new_ad_resources:
-                    # Each ad gets SINGLES_DAY label (THEMA_AD disabled to reduce API operations)
-                    new_label_ops.append((ad_res, labels["SINGLES_DAY"]))
-                    # new_label_ops.append((ad_res, labels["THEMA_AD"]))  # Disabled
+                for i, ad_res in enumerate(new_ad_resources):
+                    # Get the corresponding input to know which theme label to use
+                    if i < len(processed_inputs):
+                        inp = processed_inputs[i]
+                        theme_label_name = get_theme_label(inp.theme_name)
+                        if theme_label_name in labels:
+                            new_label_ops.append((ad_res, labels[theme_label_name]))
+                        # new_label_ops.append((ad_res, labels["THEMA_AD"]))  # Disabled to reduce API operations
 
                 await label_ads_batch(self.client, customer_id, new_label_ops)
 
@@ -347,13 +377,15 @@ class ThemaAdsProcessor:
 
             # Add results for skipped ad groups (mark as success since they were already processed)
             for inp in skipped_ags:
+                theme_label = get_theme_label(inp.theme_name)
+                done_label_name = f"{theme_label}_DONE"
                 results.append(
                     ProcessingResult(
                         customer_id=customer_id,
                         ad_group_id=inp.ad_group_id,
                         success=True,
                         new_ad_resource=None,
-                        error="Already processed (has SD_DONE label)",
+                        error=f"Already processed (has {done_label_name} label)",
                         operations_count=0
                     )
                 )
@@ -384,6 +416,174 @@ class ThemaAdsProcessor:
                 for inp in inputs
             ]
 
+    async def _remove_conflicting_theme_ads(
+        self,
+        customer_id: str,
+        inputs: List[AdGroupInput],
+        ad_group_resources: List[str],
+        cached_data,
+        labels: Dict[str, str]
+    ):
+        """Remove old theme ads to make room for new ones.
+
+        Google Ads has a limit of 3 RSAs per ad group. When adding a new theme ad:
+        1. If ad group has 3 RSAs, remove 1 to make room
+        2. Priority for removal:
+           a. Paused theme ads (any theme)
+           b. Active theme ads from OTHER themes (not the target theme)
+        """
+        from operations.labels import remove_ads_batch, get_ad_group_label_resources, remove_ad_group_labels_batch
+
+        # Build map of ad_group_resource -> target theme label
+        ag_target_theme = {}
+        for inp, ag_resource in zip(inputs, ad_group_resources):
+            theme_label = get_theme_label(inp.theme_name)
+            ag_target_theme[ag_resource] = theme_label
+
+        # Get all theme labels for filtering
+        from themes import get_all_theme_labels
+        all_theme_labels = set(get_all_theme_labels())
+
+        logger.info("Checking RSA counts and theme ads for cleanup...")
+
+        # Query all RSAs with labels and status
+        def _get_rsa_details():
+            """Get RSA details including status and labels."""
+            ga_service = self.client.get_service("GoogleAdsService")
+            ag_rsa_details = {}  # ag_resource -> list of {ad_resource, status, labels}
+
+            # Query RSAs in batches
+            for i in range(0, len(ad_group_resources), self.batch_size):
+                batch = ad_group_resources[i:i + self.batch_size]
+                resources_str = ", ".join(f"'{r}'" for r in batch)
+
+                query = f"""
+                    SELECT
+                        ad_group_ad.ad_group,
+                        ad_group_ad.resource_name,
+                        ad_group_ad.status,
+                        ad_group_ad_label.label
+                    FROM ad_group_ad
+                    LEFT JOIN ad_group_ad_label ON ad_group_ad.resource_name = ad_group_ad_label.ad_group_ad
+                    WHERE ad_group_ad.ad_group IN ({resources_str})
+                        AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+                        AND ad_group_ad.status != REMOVED
+                """
+
+                try:
+                    response = ga_service.search(customer_id=customer_id, query=query)
+
+                    for row in response:
+                        ag_res = row.ad_group_ad.ad_group
+                        ad_res = row.ad_group_ad.resource_name
+                        status = str(row.ad_group_ad.status)
+
+                        # Get label if present
+                        label_res = None
+                        if hasattr(row, 'ad_group_ad_label') and row.ad_group_ad_label:
+                            label_res = row.ad_group_ad_label.label
+
+                        # Find if this ad has a theme label
+                        theme_label_name = None
+                        if label_res and label_res in labels.values():
+                            # Reverse lookup label name
+                            for label_name, label_resource in labels.items():
+                                if label_resource == label_res and label_name in all_theme_labels:
+                                    theme_label_name = label_name
+                                    break
+
+                        if ag_res not in ag_rsa_details:
+                            ag_rsa_details[ag_res] = []
+
+                        ag_rsa_details[ag_res].append({
+                            'ad_resource': ad_res,
+                            'status': status,
+                            'theme_label': theme_label_name
+                        })
+
+                except Exception as e:
+                    logger.warning(f"Failed to get RSA details: {e}")
+
+            return ag_rsa_details
+
+        # Get RSA details
+        loop = asyncio.get_event_loop()
+        ag_rsa_details = await loop.run_in_executor(None, _get_rsa_details)
+
+        # Process each ad group
+        ads_to_remove = []
+        done_labels_to_remove = {}  # ag_resource -> set of done_label_names
+
+        for ag_resource in ad_group_resources:
+            rsa_list = ag_rsa_details.get(ag_resource, [])
+            current_count = len(rsa_list)
+            target_theme = ag_target_theme.get(ag_resource)
+
+            if current_count < 3:
+                continue  # No cleanup needed, we have room
+
+            logger.info(f"  Ad group {ag_resource}: {current_count} RSAs (at limit)")
+
+            # Need to remove 1 RSA to make room for the new theme ad
+            # Priority: 1) Paused theme ads, 2) Active theme ads from OTHER themes
+
+            # Sort RSAs by removal priority
+            paused_theme_ads = []
+            active_other_theme_ads = []
+
+            for rsa in rsa_list:
+                if rsa['theme_label']:  # This is a theme ad
+                    if rsa['status'] == 'PAUSED':
+                        paused_theme_ads.append(rsa)
+                    elif rsa['theme_label'] != target_theme:
+                        active_other_theme_ads.append(rsa)
+
+            # Pick one ad to remove (highest priority available)
+            ad_to_remove = None
+            if paused_theme_ads:
+                ad_to_remove = paused_theme_ads[0]
+                logger.info(f"    Will remove paused {ad_to_remove['theme_label']} ad")
+            elif active_other_theme_ads:
+                ad_to_remove = active_other_theme_ads[0]
+                logger.info(f"    Will remove active {ad_to_remove['theme_label']} ad (different theme)")
+
+            if ad_to_remove:
+                ads_to_remove.append(ad_to_remove['ad_resource'])
+
+                # Mark the DONE label for removal
+                removed_theme = ad_to_remove['theme_label']
+                done_label = f"{removed_theme}_DONE"
+                if ag_resource not in done_labels_to_remove:
+                    done_labels_to_remove[ag_resource] = set()
+                done_labels_to_remove[ag_resource].add(done_label)
+
+        # Execute removals
+        if ads_to_remove:
+            logger.info(f"Removing {len(ads_to_remove)} theme ads to make room for new ads")
+            try:
+                removed_count = await remove_ads_batch(self.client, customer_id, ads_to_remove)
+                logger.info(f"  Successfully removed {removed_count} ads")
+            except Exception as e:
+                logger.warning(f"  Failed to remove ads: {e}")
+
+        # Remove DONE labels
+        for ag_resource, done_labels in done_labels_to_remove.items():
+            for done_label in done_labels:
+                try:
+                    label_resources = await get_ad_group_label_resources(
+                        self.client, customer_id, [ag_resource], done_label
+                    )
+                    if label_resources:
+                        await remove_ad_group_labels_batch(self.client, customer_id, label_resources)
+                        logger.info(f"  Removed {done_label} label from {ag_resource}")
+
+                        # Update cached data
+                        if ag_resource in cached_data.ad_group_labels:
+                            cached_data.ad_group_labels[ag_resource].discard(done_label)
+
+                except Exception as e:
+                    logger.warning(f"  Failed to remove {done_label} label: {e}")
+
     def _build_operations_for_ad_group(
         self,
         inp: AdGroupInput,
@@ -408,9 +608,9 @@ class ThemaAdsProcessor:
         base_headlines_3 = existing_ad.headlines[:3]
         base_desc_1 = existing_ad.descriptions[0] if existing_ad.descriptions else ""
 
-        # Generate themed content
+        # Generate themed content using the input's theme
         extra_headlines, extra_descriptions, path1 = generate_themed_content(
-            self.theme,
+            inp.theme_name,
             base_headlines_3,
             base_desc_1
         )
@@ -429,9 +629,13 @@ class ThemaAdsProcessor:
 
         # Build label operations
         ad_labels = []  # Will be filled after ad creation
+
+        # Get theme-specific DONE label
+        theme_label = get_theme_label(inp.theme_name)
+        done_label_name = f"{theme_label}_DONE"
+
         ag_labels = [
-            # (ad_group_resource, labels["BF_2025"]),  # Disabled to reduce API operations
-            (ad_group_resource, labels["SD_DONE"])
+            (ad_group_resource, labels[done_label_name])
         ]
 
         return {

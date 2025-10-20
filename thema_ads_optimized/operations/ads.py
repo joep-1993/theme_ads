@@ -2,12 +2,23 @@
 
 import asyncio
 import logging
-from typing import List
+from typing import List, Dict
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
 from utils.retry import async_retry
+from utils.rate_limiter import AdaptiveRateLimiter
 
 logger = logging.getLogger(__name__)
+
+# Global rate limiter instance (shared across all ad creation operations)
+# CONSERVATIVE settings: More stability, slower but more reliable
+_rate_limiter = AdaptiveRateLimiter(
+    initial_delay=2.0,      # CONSERVATIVE: Start slower (was 1.0)
+    min_delay=1.0,          # CONSERVATIVE: Higher minimum (was 0.5)
+    max_delay=15.0,         # CONSERVATIVE: Higher maximum (was 10.0)
+    increase_factor=2.5,    # CONSERVATIVE: More aggressive backoff (was 2.0)
+    decrease_factor=0.98    # CONSERVATIVE: Slower reduction (was 0.95)
+)
 
 
 @async_retry(max_attempts=5, delay=2.0, backoff=2.0)
@@ -125,22 +136,31 @@ async def create_rsa_batch(
             chunk_num = chunk_start//BATCH_LIMIT + 1
             total_chunks = (len(ad_data_list)-1)//BATCH_LIMIT + 1
 
+            # Use adaptive delay before processing chunk (except for first chunk)
+            if chunk_num > 1:
+                _rate_limiter.wait()
+
             result = _create_chunk_with_retry(service, chunk, BATCH_LIMIT)
 
             all_resource_names.extend(result["resources"])
             all_failures.extend(result["failures"])
 
+            # Update rate limiter based on results
             if result["resources"]:
                 logger.info(f"Created {len(result['resources'])} RSAs in chunk {chunk_num}/{total_chunks}")
+                _rate_limiter.on_success()
             if result["failures"]:
                 logger.warning(f"Failed to create {len(result['failures'])} RSAs in chunk {chunk_num}/{total_chunks}")
-
-            # Add delay between chunks to avoid rate limits and give Google's crawler time
-            if chunk_num < total_chunks:
-                import time
-                time.sleep(5.0)  # 5s delay between batches to prevent overwhelming CloudFront/Google crawler
+                # Only increase delay if all items failed (indicates rate limiting)
+                if len(result["failures"]) == len(chunk):
+                    _rate_limiter.on_error("batch_failure")
 
         logger.info(f"Created {len(all_resource_names)} RSAs total, {len(all_failures)} failures across {total_chunks} chunks")
+
+        # Log rate limiter stats
+        stats = _rate_limiter.get_stats()
+        logger.info(f"Rate limiter stats: delay={stats['current_delay']:.2f}s, success_rate={stats['success_rate']:.2%}")
+
         return {"resources": all_resource_names, "failures": all_failures}
 
     loop = asyncio.get_event_loop()
@@ -203,9 +223,15 @@ def build_ad_data(
     all_descriptions = ([base_description] if base_description else []) + (extra_descriptions or [])
     all_descriptions = [d for d in all_descriptions if d][:4]
 
+    # Add campaign_theme=1 query parameter to the final URL
+    if "?" in final_url:
+        final_url_with_param = f"{final_url}&campaign_theme=1"
+    else:
+        final_url_with_param = f"{final_url}?campaign_theme=1"
+
     return {
         "ad_group_resource": ad_group_resource,
-        "final_url": final_url,
+        "final_url": final_url_with_param,
         "headlines": all_headlines,
         "descriptions": all_descriptions,
         "path1": path1,
