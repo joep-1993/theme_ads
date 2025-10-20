@@ -151,9 +151,29 @@ async def create_rsa_batch(
                 _rate_limiter.on_success()
             if result["failures"]:
                 logger.warning(f"Failed to create {len(result['failures'])} RSAs in chunk {chunk_num}/{total_chunks}")
-                # Only increase delay if all items failed (indicates rate limiting)
+                # Only increase delay if all items failed AND it's a rate limit error (not policy violation)
                 if len(result["failures"]) == len(chunk):
-                    _rate_limiter.on_error("batch_failure")
+                    # Check if this is a policy violation (should not trigger rate limiting)
+                    error_messages = [f.get("error", "") for f in result["failures"]]
+                    is_policy_violation = any(
+                        "PROHIBITED" in msg or "policy" in msg.lower() or "disapproved" in msg.lower()
+                        for msg in error_messages
+                    )
+                    is_rate_limit = any(
+                        "RATE_EXCEEDED" in msg or "RESOURCE_EXHAUSTED" in msg or "503" in msg
+                        for msg in error_messages
+                    )
+
+                    if is_rate_limit:
+                        _rate_limiter.on_error("rate_limit")
+                        logger.warning(f"Rate limit detected in chunk {chunk_num}/{total_chunks}, increasing delay")
+                    elif is_policy_violation:
+                        # Policy violation - don't trigger rate limiting
+                        logger.info(f"Policy violation in chunk {chunk_num}/{total_chunks}, NOT increasing delay")
+                    else:
+                        # Unknown error type - apply rate limiting to be safe
+                        _rate_limiter.on_error("batch_failure")
+                        logger.warning(f"Unknown error type in chunk {chunk_num}/{total_chunks}, increasing delay")
 
         logger.info(f"Created {len(all_resource_names)} RSAs total, {len(all_failures)} failures across {total_chunks} chunks")
 
