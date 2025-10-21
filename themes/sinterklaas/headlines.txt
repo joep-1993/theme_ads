@@ -8,7 +8,7 @@
         "{KeyWord:Sale} Niet Missen!",
         "Nog {COUNTDOWN(2025-12-05 00:00:00,5)} Tot Sint",
         "Sint – Eindigt Over {COUNTDOWN(2025-12-05 00:00:00,5)}",
-        "Shop Nu – Slechts {COUNTDOWN(2025-12-05 00:00:00,5)} Te Gaan",
+        "Shop Nu – Nog {COUNTDOWN(2025-12-05 00:00:00,5)}",
         "Sint Start In {COUNTDOWN(2025-12-05 00:00:00,5)}",
         "{KeyWord:Sint Deal} – Nog {COUNTDOWN(2025-12-05 00:00:00,5)}",
         "{KeyWord:Aanbieding} Eindigt Over {COUNTDOWN(2025-12-05 00:00:00,5)}",
