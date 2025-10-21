@@ -291,9 +291,60 @@ async def discover_ad_groups(
 
         logger.info(f"Found {len(ag_with_done_label)} ad groups with {done_label_name} label")
 
-        # Build input data from ad groups without theme DONE label
+        # Also check for ATTEMPTED labels (all themes) to exclude permanently failed items
+        attempted_label_name = f"{theme_label}_ATTEMPTED"
+        ag_with_attempted_label = set()
+
+        for customer in beslist_customers:
+            customer_id = customer['id']
+
+            customer_ag_resources = [
+                ag_resource for ag_resource, ag_data in ad_group_map.items()
+                if ag_data['customer_id'] == customer_id
+            ]
+
+            if not customer_ag_resources:
+                continue
+
+            # Get ATTEMPTED label resource
+            attempted_label_query = f"""
+                SELECT label.resource_name
+                FROM label
+                WHERE label.name = '{attempted_label_name}'
+                LIMIT 1
+            """
+            try:
+                label_response = ga_service.search(customer_id=customer_id, query=attempted_label_query)
+                attempted_label_resource = None
+                for row in label_response:
+                    attempted_label_resource = row.label.resource_name
+                    break
+
+                if attempted_label_resource:
+                    # Batch query in chunks
+                    for i in range(0, len(customer_ag_resources), batch_size):
+                        batch = customer_ag_resources[i:i + batch_size]
+                        resources_str = ", ".join(f"'{r}'" for r in batch)
+
+                        label_check_query = f"""
+                            SELECT ad_group_label.ad_group
+                            FROM ad_group_label
+                            WHERE ad_group_label.ad_group IN ({resources_str})
+                            AND ad_group_label.label = '{attempted_label_resource}'
+                        """
+
+                        label_response = ga_service.search(customer_id=customer_id, query=label_check_query)
+                        for row in label_response:
+                            ag_with_attempted_label.add(row.ad_group_label.ad_group)
+
+            except Exception as e:
+                logger.warning(f"  Could not check {attempted_label_name} labels for customer {customer_id}: {e}")
+
+        logger.info(f"Found {len(ag_with_attempted_label)} ad groups with {attempted_label_name} label (excluded)")
+
+        # Build input data from ad groups without DONE or ATTEMPTED labels
         for ag_resource, ag_data in ad_group_map.items():
-            if ag_resource not in ag_with_done_label:
+            if ag_resource not in ag_with_done_label and ag_resource not in ag_with_attempted_label:
                 input_data.append({
                     'customer_id': ag_data['customer_id'],
                     'campaign_id': ag_data['campaign_id'],
@@ -1504,4 +1555,175 @@ async def list_themes():
         return {"themes": themes}
 
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/thema-ads/label-failed")
+async def label_failed_ad_groups(
+    background_tasks: BackgroundTasks = None,
+    theme: str = Form(...),
+    job_ids: str = Form(...)
+):
+    """
+    Label permanently failed ad groups with THEME_XX_ATTEMPTED label.
+    This prevents them from appearing in future discoveries.
+
+    Args:
+        theme: Theme name (e.g., 'black_friday')
+        job_ids: Comma-separated job IDs (e.g., '232,233,234')
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        job_id_list = [int(x.strip()) for x in job_ids.split(',')]
+        logger.info(f"Labeling failed ad groups for theme={theme}, jobs={job_id_list}")
+
+        # Validate theme
+        if not is_valid_theme(theme):
+            supported_themes = ', '.join(SUPPORTED_THEMES.keys())
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid theme '{theme}'. Supported themes: {supported_themes}"
+            )
+
+        # Get failed ad groups from database
+        from backend.database import get_db_connection
+        import psycopg2.extras
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        cur.execute("""
+            SELECT DISTINCT customer_id, ad_group_id
+            FROM thema_ads_job_items
+            WHERE job_id = ANY(%s)
+            AND status = 'failed'
+            AND (
+                error_message LIKE '%%no resource returned%%'
+                OR error_message LIKE '%%PROHIBITED_SYMBOLS%%'
+                OR error_message LIKE '%%DESTINATION_NOT_WORKING%%'
+                OR error_message LIKE '%%POLICY_FINDING%%'
+            )
+            ORDER BY customer_id, ad_group_id
+        """, (job_id_list,))
+
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            return {
+                "status": "no_failures_found",
+                "message": "No permanently failed ad groups found in specified jobs",
+                "total_labeled": 0
+            }
+
+        # Group by customer
+        from collections import defaultdict
+        by_customer = defaultdict(list)
+        for row in rows:
+            by_customer[row['customer_id']].append(row['ad_group_id'])
+
+        total_ad_groups = len(rows)
+        logger.info(f"Found {total_ad_groups} failed ad groups across {len(by_customer)} customers")
+
+        # Load Google Ads client
+        from pathlib import Path
+        from dotenv import load_dotenv
+
+        env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+        if not env_path.exists():
+            raise HTTPException(status_code=500, detail="Google Ads credentials not configured")
+
+        load_dotenv(env_path)
+
+        from config import load_config_from_env
+        from google_ads_client import initialize_client
+        from themes import get_theme_label
+
+        config = load_config_from_env()
+        client = initialize_client(config.google_ads)
+
+        # Get theme label
+        theme_label = get_theme_label(theme)
+        attempted_label_name = f"{theme_label}_ATTEMPTED"
+
+        logger.info(f"Applying label: {attempted_label_name}")
+
+        # Label ad groups for each customer
+        ga_service = client.get_service("GoogleAdsService")
+        label_service = client.get_service("LabelService")
+        ad_group_label_service = client.get_service("AdGroupLabelService")
+
+        total_labeled = 0
+
+        for customer_id, ad_group_ids in by_customer.items():
+            try:
+                logger.info(f"Processing customer {customer_id}: {len(ad_group_ids)} ad groups")
+
+                # Ensure label exists
+                label_query = f"SELECT label.resource_name FROM label WHERE label.name = '{attempted_label_name}' LIMIT 1"
+                label_resource = None
+
+                try:
+                    label_response = ga_service.search(customer_id=customer_id, query=label_query)
+                    for row in label_response:
+                        label_resource = row.label.resource_name
+                        break
+                except:
+                    pass
+
+                if not label_resource:
+                    # Create label
+                    logger.info(f"  Creating label '{attempted_label_name}'")
+                    label_operation = client.get_type("LabelOperation")
+                    label = label_operation.create
+                    label.name = attempted_label_name
+
+                    response = label_service.mutate_labels(
+                        customer_id=customer_id,
+                        operations=[label_operation]
+                    )
+                    label_resource = response.results[0].resource_name
+
+                # Apply label to ad groups in batches
+                operations = []
+                for ag_id in ad_group_ids:
+                    operation = client.get_type("AdGroupLabelOperation")
+                    ad_group_label = operation.create
+                    ad_group_label.ad_group = ga_service.ad_group_path(customer_id, ag_id)
+                    ad_group_label.label = label_resource
+                    operations.append(operation)
+
+                # Batch in chunks of 5000
+                BATCH_SIZE = 5000
+                for i in range(0, len(operations), BATCH_SIZE):
+                    batch = operations[i:i + BATCH_SIZE]
+                    try:
+                        response = ad_group_label_service.mutate_ad_group_labels(
+                            customer_id=customer_id,
+                            operations=batch
+                        )
+                        total_labeled += len(response.results)
+                        logger.info(f"  Labeled {len(response.results)} ad groups")
+                    except Exception as e:
+                        logger.error(f"  Error labeling batch: {e}")
+
+            except Exception as e:
+                logger.error(f"Error processing customer {customer_id}: {e}")
+                continue
+
+        return {
+            "status": "completed",
+            "theme": theme,
+            "label_applied": attempted_label_name,
+            "total_ad_groups_found": total_ad_groups,
+            "total_labeled": total_labeled,
+            "customers_processed": len(by_customer)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to label ad groups: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
