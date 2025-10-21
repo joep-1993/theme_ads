@@ -47,6 +47,29 @@ asyncio.exceptions.CancelledError: Task cancelled
 - **Files Modified**: `Dockerfile`, `docker-compose.yml`, `backend/main.py`
 - **Documentation**: See `JOB_STALL_ROOT_CAUSE_AND_FIX.md` for detailed analysis
 
+### Google Ads API 503 Service Unavailable / Network Outages (2025-10-21)
+- **Problem**: Temporary Google Ads API outages cause high failure rates (74% for job 225)
+- **Error**: `503 failed to connect to all addresses; last error: UNKNOWN: ipv4:142.251.36.10:443: Failed to connect to remote host: Timeout occurred: FD Shutdown`
+- **Impact**: Jobs complete but with abnormally high failure rates (74% vs normal 20-30%)
+- **Root Cause**: Google's infrastructure experiencing network/connectivity issues, not ad content problems
+- **Observable Pattern**:
+  - Multiple jobs fail simultaneously (jobs 226-228 had OAuth timeout errors during same window)
+  - All failures show identical 503 connection errors
+  - Same customer IDs appearing repeatedly in failures (systematic, not per-account issue)
+  - Time window correlation (10:12-11:41 CEST for job 225)
+- **Key Insight**: Failed items do NOT receive DONE labels
+  - Successful items: Get DONE label, won't be reprocessed
+  - Failed items: No DONE label, can be safely retried
+  - System automatically prevents duplicates via label checking
+- **Recovery Options**:
+  1. Use Checkup function - finds ad groups without DONE labels, creates repair jobs
+  2. Re-run same discovery - automatically skips items with DONE labels
+  3. Export failed items CSV and re-upload
+- **Example**: Job 225 processed 50K items:
+  - 12,902 successful (25.8%) - have DONE label ✅
+  - 37,098 failed (74.2%) - no DONE label, can retry ⚠️
+- **Prevention**: None (external service issue), but failures are safely recoverable
+
 ### Rate Limiter Incorrectly Triggered by Policy Violations (2025-10-20)
 - **Problem**: Google Ads policy violations (PROHIBITED content) were triggering rate limiting, causing unnecessary 15-second delays
 - **Impact**: Jobs slowed down significantly despite no actual API rate limiting
