@@ -1346,5 +1346,108 @@ setInterval(loadQueueStatus, 10000);  // Refresh every 10s
 - **Benefits**: Unattended processing, reduced manual intervention, overnight job completion
 - **Example**: Queue 10 theme discoveries (Black Friday, Cyber Monday, etc.), enable queue, let system process all overnight
 
+### ATTEMPTED Label System for Failed Ad Groups (2025-10-21)
+- **Problem**: Discovery kept finding the same permanently failed ad groups in every run
+  - Failed ad groups don't get DONE label, so they appear in subsequent discoveries
+  - Example: Job 232-234 had ~7,500 failures (policy violations, API errors)
+  - Each new discovery would find these same 7,500+ failed items repeatedly
+- **Root Cause**: Only successful ad groups receive `THEME_XX_DONE` label
+  - Failed items remain unlabeled → included in future discoveries
+  - Error types: `no resource returned`, `PROHIBITED_SYMBOLS`, `DESTINATION_NOT_WORKING`, `POLICY_FINDING`
+- **Solution**: Added ATTEMPTED label system to exclude permanently failed items
+```python
+# New endpoint: /api/thema-ads/label-failed
+POST /api/thema-ads/label-failed
+  - theme: black_friday
+  - job_ids: "232,233,234"
+
+# Labels applied: THEME_XX_ATTEMPTED (e.g., THEME_BF_ATTEMPTED)
+# Covers failures:
+  - "no resource returned" (API errors)
+  - "PROHIBITED_SYMBOLS" (policy violations)
+  - "DESTINATION_NOT_WORKING" (broken URLs)
+  - "POLICY_FINDING" (other policy issues)
+
+# Discovery updated to exclude ATTEMPTED labels
+ag_with_attempted_label = set()
+attempted_label_name = f"{theme_label}_ATTEMPTED"
+# Check for ATTEMPTED labels same way as DONE labels
+# Build input data: exclude both DONE and ATTEMPTED
+if ag_resource not in ag_with_done_label and ag_resource not in ag_with_attempted_label:
+    input_data.append(ad_group_data)
+```
+- **Implementation Details**:
+  - Endpoint queries database for failed items by error pattern
+  - Groups failures by customer_id for efficient batch labeling
+  - Creates label if doesn't exist (per customer)
+  - Applies label in batches of 5,000 using Google Ads API
+  - Discovery checks both DONE and ATTEMPTED labels (works across all themes)
+- **Example Run**: Labeled 4,780 failed ad groups from jobs 232-234 across 3 customers
+- **Benefits**:
+  - No more duplicate discoveries of failed items
+  - Failed items preserved with ATTEMPTED label for later manual fixes
+  - Works across all themes (each has own ATTEMPTED label)
+  - Clean separation: DONE = success, ATTEMPTED = tried but failed
+- **Usage Pattern**:
+  1. Run discovery and processing
+  2. Label permanent failures: `curl -X POST .../label-failed -F "theme=black_friday" -F "job_ids=232,233,234"`
+  3. Future discoveries automatically exclude ATTEMPTED items
+  4. Fix issues in Google Ads later, remove ATTEMPTED label, re-run
+
+### Headline Length Validation - 30 Character RSA Limit (2025-10-21)
+- **Problem**: Job 237 (Sinterklaas, 50,000 ad groups) had 100% failure rate
+  - Error: `string_length_error: TOO_LONG` on headline
+  - Trigger: `"Shop Nu – Slechts {COUNTDOWN(2025-12-05 00:00:00,5)} Te Gaan"`
+  - Headline rendered to 37+ characters (Google Ads RSA limit: 30)
+- **Root Cause**: Headlines with countdown functions not validated for max length after rendering
+  - Base text + rendered countdown exceeded 30 chars
+  - Example: `"Shop Nu – Slechts 14 dagen Te Gaan"` = 37 chars
+- **Analysis Tool**: Created Python validator to check all theme headlines
+```python
+# Estimate rendered length
+MAX_KEYWORD = 15   # {KeyWord:...} can be up to 15 chars
+MAX_COUNTDOWN = 9  # "14 dagen" = 9 chars
+
+keywords = len(re.findall(r'\{KeyWord:[^}]*\}', line))
+countdowns = len(re.findall(r'\{COUNTDOWN\([^)]*\)\}', line))
+base = re.sub(r'\{KeyWord:[^}]*\}', '', line)
+base = re.sub(r'\{COUNTDOWN\([^)]*\)\}', '', base)
+max_len = len(base) + (keywords * MAX_KEYWORD) + (countdowns * MAX_COUNTDOWN)
+
+if max_len > 30:
+    print(f"⚠️ TOO LONG: {max_len} chars")
+```
+- **Findings**: Multiple headlines exceeded 30 chars across all themes
+  - Black Friday: 2 headlines too long
+  - Cyber Monday: 8 headlines too long (worst offender)
+  - Sinterklaas: 7 headlines too long
+  - Kerstmis: 5 headlines too long
+- **Common Issues**:
+  - `"Bestel {KeyWord:Vandaag} Met Korting"` → 34 chars
+  - `"{KeyWord:Aanbieding} – Gratis Verzending"` → 35 chars
+  - `"Snel! {KeyWord:Sale} – {COUNTDOWN(...)} Te Gaan"` → 41 chars
+  - `"{KeyWord:Aanbieding} Eindigt Over {COUNTDOWN(...)}"` → 38 chars
+- **Solution**: Replaced all too-long headlines across all themes
+```
+Old: "Bestel {KeyWord:Vandaag} Met Korting" (34 chars)
+New: "Bestel {KeyWord:Vandaag}!" (23 chars)
+
+Old: "{KeyWord:Aanbieding} – Gratis Verzending" (35 chars)
+New: "{KeyWord:Deal} Shop nu!" (24 chars)
+
+Old: "Snel! {KeyWord:Sale} – {COUNTDOWN(...)} Te Gaan" (41 chars)
+New: "{KeyWord:Sale} – {COUNTDOWN(...)}" (27 chars)
+
+Old: "{KeyWord:Aanbieding} Eindigt Over {COUNTDOWN(...)}" (38 chars)
+New: "{KeyWord:Aanbieding} Nog {COUNTDOWN(...)}" (29 chars)
+```
+- **Files Modified**:
+  - `themes/black_friday/headlines.txt`
+  - `themes/cyber_monday/headlines.txt`
+  - `themes/sinterklaas/headlines.txt`
+  - `themes/kerstmis/headlines.txt`
+- **Prevention**: Always validate headlines render to ≤30 chars before adding to themes
+- **Impact**: All themes now process successfully without TOO_LONG errors
+
 ---
-_Last updated: 2025-10-20_
+_Last updated: 2025-10-21_
