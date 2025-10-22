@@ -85,28 +85,34 @@ async def startup_event():
 - **Result**: Jobs interrupted by container restart are properly marked as failed instead of showing false "running" status
 - **Note**: Jobs can be resumed manually after restart - the item-level status tracking enables precise resume from where it left off
 
-### Job Database Update Callback Issue (2025-10-22)
-- **Problem**: Job shows as "running" and creates RSAs (visible in logs), but database never updates with results
+### Auto-Queue Async Context Issue (2025-10-22)
+- **Problem**: Jobs started by auto-queue feature showing "0 progress" for extended periods (10-20 minutes)
 - **Symptoms**:
-  - Job status remains "running"
-  - All items stay "pending" (0 successful, 0 failed)
+  - Job status shows "running"
+  - All items remain "pending" (0 successful, 0 failed) for 10+ minutes
   - Logs show ad creation activity (e.g., "Created 100 RSAs in chunk 162/350")
-  - Google Ads API requests happening (rate limiting warnings visible)
-- **Root Cause**: Job started/resumed in a way that bypasses normal database update callbacks
-- **Impact**: Processing happens in Google Ads but results aren't persisted to database
-- **Example**: Job 266 created ~16,200 RSAs but database showed 0 progress after 12+ minutes
-- **Solution**: Pause and delete broken job, recreate with proper initialization
-```bash
-# 1. Pause the job
-curl -X POST http://localhost:8002/api/thema-ads/jobs/266/pause
+  - Database updates eventually start but with significant delay
+- **Root Cause**: Auto-queue using `await self.process_job(job_id)` instead of `asyncio.create_task()`
+- **Location**: `backend/thema_ads_service.py` line 804 in `_start_next_job_if_queue_enabled()`
+- **Impact**: Jobs started by auto-queue may have delayed database updates or improper async context
+- **Example**: Jobs 267 & 268 showed 0 progress initially, but logs revealed updates were happening
+- **Solution**: Changed to use `asyncio.create_task()` for proper async context
+```python
+# ❌ BEFORE: Direct await blocks and may break async context
+async def _start_next_job_if_queue_enabled(self):
+    next_job_id = self.get_next_pending_job()
+    if next_job_id:
+        await self.process_job(next_job_id)  # Blocking, wrong context
 
-# 2. Delete from database
-docker exec theme_ads-db-1 psql -U postgres -d thema_ads -c \
-  "DELETE FROM thema_ads_job_items WHERE job_id = 266; DELETE FROM thema_ads_jobs WHERE id = 266;"
-
-# 3. Recreate job with proper startup
+# ✅ AFTER: Create task in background with proper context
+async def _start_next_job_if_queue_enabled(self):
+    next_job_id = self.get_next_pending_job()
+    if next_job_id:
+        asyncio.create_task(self.process_job(next_job_id))  # Non-blocking, proper context
 ```
-- **Prevention**: Always use standard job creation endpoints (upload, discover, checkup) instead of manually manipulating database or using resume on corrupted jobs
+- **Note**: Normal job starts via API use `background_tasks.add_task()` which works correctly
+- **Verification**: Job 265 (50K items) completed successfully with proper database tracking (31,399 successful + 8,601 failed + 10,000 skipped)
+- **Fixed**: 2025-10-22, commit df4ebf7
 
 ### Google Ads API 503 Service Unavailable / Network Outages (2025-10-21)
 - **Problem**: Temporary Google Ads API outages cause high failure rates (74% for job 225)

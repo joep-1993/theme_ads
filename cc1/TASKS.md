@@ -10,6 +10,7 @@ _Tasks currently being worked on_
 ## Completed
 _Finished tasks (move here when done)_
 
+- [x] Fix auto-queue async context issue (changed _start_next_job_if_queue_enabled to use asyncio.create_task instead of await, prevents delayed database updates for auto-queued jobs) #claude-session:2025-10-22
 - [x] Update Check-up function for multi-theme support (rewrote checkup_ad_groups() to query database for theme_name per ad group, check theme-specific labels instead of text search, create repair jobs with correct theme; supports all themes: black_friday, cyber_monday, sinterklaas, kerstmis, singles_day) #claude-session:2025-10-09
 - [x] Implement multi-theme system (Black Friday, Cyber Monday, Sinterklaas, Kerstmis; Excel upload with theme column; theme selection in Auto-Discover; theme-specific content loading; dynamic label management; per-ad-group theming; processing by customer with theme applied per ad group) #claude-session:2025-10-09
 - [x] Remove SINGLES_DAY ads with batch deletion (batch removed 1,046 SINGLES_DAY ads and 20,312 SD_DONE label associations; created remove_singles_day_ads_batch.py script with proper error handling) #claude-session:2025-10-09
