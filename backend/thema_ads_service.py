@@ -801,7 +801,8 @@ class ThemaAdsService:
             return
 
         logger.info(f"Auto-queue: Starting next pending job {next_job_id}")
-        await self.process_job(next_job_id)
+        # Create task in background to avoid blocking and ensure proper async context
+        asyncio.create_task(self.process_job(next_job_id))
 
 
 # Global service instance
