@@ -18,6 +18,18 @@ cd thema_ads_optimized/
 # Database Operations
 docker-compose up -d           # Ensure containers are running
 docker-compose exec -T db psql -U postgres -d thema_ads -c "DELETE FROM thema_ads_jobs;"  # Delete all jobs (cascades to job_items)
+
+# Job Deletion (Proper Process)
+# 1. Pause job first via API
+curl -X POST http://localhost:8002/api/thema-ads/jobs/{job_id}/pause
+
+# 2. Delete from database (cascades to job_items)
+docker exec theme_ads-db-1 psql -U postgres -d thema_ads -c \
+  "DELETE FROM thema_ads_job_items WHERE job_id = {job_id}; DELETE FROM thema_ads_jobs WHERE id = {job_id};"
+
+# 3. Verify deletion
+docker exec theme_ads-db-1 psql -U postgres -d thema_ads -c \
+  "SELECT COUNT(*) FROM thema_ads_job_items WHERE job_id = {job_id};"
 ```
 
 ## Common Issues & Solutions
@@ -46,6 +58,55 @@ asyncio.exceptions.CancelledError: Task cancelled
      - Prevents false "running" status after container restart
 - **Files Modified**: `Dockerfile`, `docker-compose.yml`, `backend/main.py`
 - **Documentation**: See `JOB_STALL_ROOT_CAUSE_AND_FIX.md` for detailed analysis
+
+### Stale Job Cleanup on Container Startup (2025-10-22)
+- **Problem**: Container restarts leave jobs in "running" state even though they're no longer processing
+- **Behavior**: On application startup, system detects jobs marked as "running" from previous session
+- **Solution**: Automatic cleanup in startup event handler
+```python
+@app.on_event("startup")
+async def startup_event():
+    # Find stale running jobs
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM thema_ads_jobs WHERE status = 'running'")
+    stale_jobs = cur.fetchall()
+
+    for job in stale_jobs:
+        logger.warning(f"Found stale running job {job['id']}, marking as failed")
+        cur.execute("""
+            UPDATE thema_ads_jobs
+            SET status = 'failed',
+                error_message = 'Job interrupted by container restart'
+            WHERE id = %s
+        """, (job['id'],))
+    conn.commit()
+```
+- **Result**: Jobs interrupted by container restart are properly marked as failed instead of showing false "running" status
+- **Note**: Jobs can be resumed manually after restart - the item-level status tracking enables precise resume from where it left off
+
+### Job Database Update Callback Issue (2025-10-22)
+- **Problem**: Job shows as "running" and creates RSAs (visible in logs), but database never updates with results
+- **Symptoms**:
+  - Job status remains "running"
+  - All items stay "pending" (0 successful, 0 failed)
+  - Logs show ad creation activity (e.g., "Created 100 RSAs in chunk 162/350")
+  - Google Ads API requests happening (rate limiting warnings visible)
+- **Root Cause**: Job started/resumed in a way that bypasses normal database update callbacks
+- **Impact**: Processing happens in Google Ads but results aren't persisted to database
+- **Example**: Job 266 created ~16,200 RSAs but database showed 0 progress after 12+ minutes
+- **Solution**: Pause and delete broken job, recreate with proper initialization
+```bash
+# 1. Pause the job
+curl -X POST http://localhost:8002/api/thema-ads/jobs/266/pause
+
+# 2. Delete from database
+docker exec theme_ads-db-1 psql -U postgres -d thema_ads -c \
+  "DELETE FROM thema_ads_job_items WHERE job_id = 266; DELETE FROM thema_ads_jobs WHERE id = 266;"
+
+# 3. Recreate job with proper startup
+```
+- **Prevention**: Always use standard job creation endpoints (upload, discover, checkup) instead of manually manipulating database or using resume on corrupted jobs
 
 ### Google Ads API 503 Service Unavailable / Network Outages (2025-10-21)
 - **Problem**: Temporary Google Ads API outages cause high failure rates (74% for job 225)
@@ -729,6 +790,40 @@ thema_ads_jobs: id, status, total, processed, successful, failed
 -- Items track individual ad groups
 thema_ads_job_items: id, job_id, customer_id, ad_group_id, status, error_message
 ```
+
+### Job Resume Capability - How It Works (2025-10-22)
+- **Pattern**: Item-level status tracking enables precise resume from interruption point
+- **How Resume Works**:
+  1. Job is paused or interrupted (container restart, manual pause, crash)
+  2. Database preserves exact state of every item (successful, failed, pending)
+  3. Resume calls `get_pending_items(job_id)`: `SELECT ... WHERE job_id = X AND status = 'pending'`
+  4. Only truly pending items are processed (completed items skipped)
+- **Real Example - Job 254**:
+  - Before restart: 23,031 successful + 1,100 failed + 25,869 pending (total: 50,000)
+  - After restart: Resumed and processed only the 25,869 pending items
+  - Did NOT reprocess the 23,031 successful or 1,100 failed items
+- **Database Query**:
+```python
+def get_pending_items(self, job_id: int) -> List[Dict]:
+    """Get all pending items for a job (for resume)."""
+    cur.execute("""
+        SELECT customer_id, campaign_id, campaign_name, ad_group_id, ad_group_name, theme_name
+        FROM thema_ads_job_items
+        WHERE job_id = %s AND status = 'pending'
+    """, (job_id,))
+    return cur.fetchall()
+```
+- **Item Status Values**:
+  - `pending`: Not yet attempted
+  - `successful`: Completed successfully (has new ad, labels applied)
+  - `failed`: Attempted but failed (has error_message)
+  - `skipped`: Skipped for valid reason (already has SD_DONE label, no existing ads)
+- **Benefits**:
+  - No duplicate processing
+  - Can pause/resume at any time
+  - Safe to restart containers
+  - Progress never lost
+- **Note**: Combines with SD_DONE label checking to prevent duplicates across different jobs
 
 ### Flexible CSV Column Handling
 - **Pattern**: Parse CSV by column names (not positions); make columns optional
