@@ -780,6 +780,698 @@ class ThemaAdsService:
             cur.close()
             conn.close()
 
+    def _get_customer_label_cache(self, client, customer_id: str) -> Dict[str, str]:
+        """
+        Fetch all labels for a customer and return a resource->name mapping.
+        This eliminates N+1 query problems by caching labels.
+
+        Returns:
+            Dict mapping label resource names to label names
+        """
+        ga_service = client.get_service("GoogleAdsService")
+        label_cache = {}
+
+        try:
+            # Single query to fetch all labels for this customer
+            labels_query = """
+                SELECT
+                    label.resource_name,
+                    label.name
+                FROM label
+            """
+
+            label_response = ga_service.search(customer_id=customer_id, query=labels_query)
+            for row in label_response:
+                label_cache[row.label.resource_name] = row.label.name
+
+            logger.info(f"Cached {len(label_cache)} labels for customer {customer_id}")
+
+        except Exception as e:
+            logger.warning(f"Could not cache labels for customer {customer_id}: {e}")
+
+        return label_cache
+
+    async def discover_all_missing_themes(
+        self,
+        client,
+        customer_filter: str = "Beslist.nl -",
+        selected_themes: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        batch_size: int = 5000,
+        job_chunk_size: int = 50000,
+        background_tasks=None
+    ) -> Dict:
+        """
+        Discover all ad groups and identify which themes are missing.
+        Creates jobs to add missing theme ads to each ad group.
+
+        Args:
+            client: Google Ads API client
+            customer_filter: Customer name prefix filter (default: "Beslist.nl -")
+            selected_themes: List of themes to process (None = all themes)
+            limit: Optional limit on number of ad groups to check
+            batch_size: Batch size for API queries
+            job_chunk_size: Maximum items per job
+            background_tasks: FastAPI background tasks
+
+        Returns:
+            Dict with discovery results and created job IDs per theme
+        """
+        logger.info(f"Starting all-themes discovery: filter='{customer_filter}', themes={selected_themes}, limit={limit}")
+
+        # Import theme utilities
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent / "thema_ads_optimized"))
+        from themes import get_theme_label, SUPPORTED_THEMES
+
+        # Default to all themes if not specified
+        if selected_themes is None:
+            selected_themes = list(SUPPORTED_THEMES.keys())
+
+        logger.info(f"Processing themes: {selected_themes}")
+
+        ga_service = client.get_service("GoogleAdsService")
+
+        stats = {
+            'customers_found': 0,
+            'customers_processed': 0,
+            'ad_groups_analyzed': 0,
+            'ad_groups_with_missing_themes': 0,
+            'jobs_created_by_theme': {},
+            'missing_by_theme': {theme: 0 for theme in selected_themes}
+        }
+
+        # Track missing themes per ad group
+        missing_by_theme = {theme: [] for theme in selected_themes}
+
+        # Step 1: Find customers matching filter
+        try:
+            # Query for customers in MCC account
+            customer_query = f"""
+                SELECT
+                    customer_client.id,
+                    customer_client.descriptive_name
+                FROM customer_client
+                WHERE customer_client.descriptive_name LIKE '{customer_filter}%'
+                AND customer_client.status = 'ENABLED'
+            """
+
+            # Query from MCC account (get login customer ID)
+            from google.ads.googleads.client import GoogleAdsClient
+            login_customer_id = client.login_customer_id
+
+            customer_response = ga_service.search(customer_id=login_customer_id, query=customer_query)
+            customer_ids = []
+
+            for row in customer_response:
+                customer_ids.append(str(row.customer_client.id))
+                logger.info(f"Found customer: {row.customer_client.descriptive_name} ({row.customer_client.id})")
+
+            stats['customers_found'] = len(customer_ids)
+
+            if not customer_ids:
+                logger.warning(f"No customers found matching filter: '{customer_filter}'")
+                return {
+                    'status': 'completed',
+                    'stats': stats,
+                    'job_ids_by_theme': {},
+                    'message': f"No customers found matching filter: '{customer_filter}'"
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to query customers: {e}", exc_info=True)
+            # Fall back to using provided customer IDs if available
+            return {
+                'status': 'error',
+                'stats': stats,
+                'message': f"Failed to query customers: {str(e)}"
+            }
+
+        # Step 2: Process each customer
+        for customer_id in customer_ids:
+            if limit and stats['ad_groups_analyzed'] >= limit:
+                logger.info(f"Reached limit of {limit} ad groups analyzed")
+                break
+
+            try:
+                logger.info(f"Processing customer {customer_id}")
+                stats['customers_processed'] += 1
+
+                # Cache all labels for this customer (eliminates N+1 queries)
+                label_cache = self._get_customer_label_cache(client, customer_id)
+
+                # Query ad groups in HS/ campaigns with active RSAs
+                ad_groups_query = """
+                    SELECT
+                        ad_group_ad.ad_group,
+                        ad_group.id,
+                        ad_group.name,
+                        campaign.id,
+                        campaign.name
+                    FROM ad_group_ad
+                    WHERE campaign.name LIKE 'HS/%'
+                    AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+                    AND ad_group_ad.status != REMOVED
+                    AND ad_group.status = 'ENABLED'
+                    AND campaign.status = 'ENABLED'
+                """
+
+                ag_response = ga_service.search(customer_id=customer_id, query=ad_groups_query)
+
+                # Collect unique ad groups
+                ad_group_map = {}
+                for row in ag_response:
+                    ag_resource = row.ad_group_ad.ad_group
+                    ag_id = str(row.ad_group.id)
+                    if ag_id not in ad_group_map:
+                        ad_group_map[ag_id] = {
+                            'customer_id': customer_id,
+                            'campaign_id': str(row.campaign.id),
+                            'campaign_name': row.campaign.name,
+                            'ad_group_id': ag_id,
+                            'ad_group_name': row.ad_group.name,
+                            'ad_group_resource': ag_resource
+                        }
+
+                logger.info(f"  Found {len(ad_group_map)} ad groups in HS/ campaigns")
+
+                if not ad_group_map:
+                    continue
+
+                # Limit ad groups if specified
+                if limit:
+                    remaining = limit - stats['ad_groups_analyzed']
+                    ad_group_list = list(ad_group_map.items())[:remaining]
+                else:
+                    ad_group_list = list(ad_group_map.items())
+
+                logger.info(f"  Batch processing {len(ad_group_list)} ad groups")
+
+                # Create resource -> ag_id lookup for fast mapping
+                resource_to_ag_id = {ag_info['ad_group_resource']: ag_id for ag_id, ag_info in ad_group_list}
+
+                # Step 3: BATCH fetch ad group labels (instead of one-by-one)
+                BATCH_SIZE = 5000
+                ag_labels_map = {}  # ag_id -> set of label names
+
+                ad_group_resources = [ag_info['ad_group_resource'] for ag_id, ag_info in ad_group_list]
+
+                for batch_start in range(0, len(ad_group_resources), BATCH_SIZE):
+                    batch = ad_group_resources[batch_start:batch_start + BATCH_SIZE]
+                    resources_str = ", ".join(f"'{r}'" for r in batch)
+
+                    batch_labels_query = f"""
+                        SELECT ad_group_label.ad_group, ad_group_label.label
+                        FROM ad_group_label
+                        WHERE ad_group_label.ad_group IN ({resources_str})
+                    """
+
+                    try:
+                        label_response = ga_service.search(customer_id=customer_id, query=batch_labels_query)
+                        for row in label_response:
+                            ag_resource = row.ad_group_label.ad_group
+                            label_resource = row.ad_group_label.label
+                            label_name = label_cache.get(label_resource)
+
+                            if label_name:
+                                ag_id = resource_to_ag_id.get(ag_resource)
+                                if ag_id:
+                                    if ag_id not in ag_labels_map:
+                                        ag_labels_map[ag_id] = set()
+                                    ag_labels_map[ag_id].add(label_name)
+                    except Exception as e:
+                        logger.warning(f"  Batch label query failed: {e}")
+
+                logger.info(f"  Fetched labels for {len(ag_labels_map)} ad groups in {(len(ad_group_resources) + BATCH_SIZE - 1) // BATCH_SIZE} batches")
+
+                # Step 4: BATCH fetch ads for all ad groups
+                all_ads_map = {}  # ag_id -> list of (ad_id, ad_resource)
+
+                for batch_start in range(0, len(ad_group_resources), BATCH_SIZE):
+                    batch = ad_group_resources[batch_start:batch_start + BATCH_SIZE]
+                    resources_str = ", ".join(f"'{r}'" for r in batch)
+
+                    batch_ads_query = f"""
+                        SELECT
+                            ad_group_ad.ad_group,
+                            ad_group_ad.ad.id,
+                            ad_group_ad.resource_name
+                        FROM ad_group_ad
+                        WHERE ad_group_ad.ad_group IN ({resources_str})
+                        AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+                        AND ad_group_ad.status != REMOVED
+                    """
+
+                    try:
+                        ads_response = ga_service.search(customer_id=customer_id, query=batch_ads_query)
+                        for row in ads_response:
+                            ag_resource = row.ad_group_ad.ad_group
+                            ad_id = str(row.ad_group_ad.ad.id)
+                            ad_resource = row.ad_group_ad.resource_name
+
+                            ag_id = resource_to_ag_id.get(ag_resource)
+                            if ag_id:
+                                if ag_id not in all_ads_map:
+                                    all_ads_map[ag_id] = []
+                                all_ads_map[ag_id].append((ad_id, ad_resource))
+                    except Exception as e:
+                        logger.warning(f"  Batch ads query failed: {e}")
+
+                logger.info(f"  Fetched ads for {len(all_ads_map)} ad groups")
+
+                # Step 5: BATCH fetch ad labels for all ads
+                all_ad_labels_map = {}  # ad_id -> set of label names
+                all_ad_resources = []
+                ad_resource_to_id = {}  # ad_resource -> ad_id lookup
+                for ads_list in all_ads_map.values():
+                    for ad_id, ad_resource in ads_list:
+                        all_ad_resources.append((ad_id, ad_resource))
+                        ad_resource_to_id[ad_resource] = ad_id
+
+                for batch_start in range(0, len(all_ad_resources), BATCH_SIZE):
+                    batch = all_ad_resources[batch_start:batch_start + BATCH_SIZE]
+                    resources_str = ", ".join(f"'{ad_resource}'" for ad_id, ad_resource in batch)
+
+                    if not resources_str:
+                        continue
+
+                    batch_ad_labels_query = f"""
+                        SELECT ad_group_ad_label.ad_group_ad, ad_group_ad_label.label
+                        FROM ad_group_ad_label
+                        WHERE ad_group_ad_label.ad_group_ad IN ({resources_str})
+                    """
+
+                    try:
+                        ad_label_response = ga_service.search(customer_id=customer_id, query=batch_ad_labels_query)
+                        for row in ad_label_response:
+                            ad_resource = row.ad_group_ad_label.ad_group_ad
+                            label_resource = row.ad_group_ad_label.label
+                            label_name = label_cache.get(label_resource)
+
+                            if label_name:
+                                ad_id = ad_resource_to_id.get(ad_resource)
+                                if ad_id:
+                                    if ad_id not in all_ad_labels_map:
+                                        all_ad_labels_map[ad_id] = set()
+                                    all_ad_labels_map[ad_id].add(label_name)
+                    except Exception as e:
+                        logger.warning(f"  Batch ad labels query failed: {e}")
+
+                logger.info(f"  Fetched labels for {len(all_ad_labels_map)} ads")
+
+                # Step 6: Process results in memory (fast)
+                for ag_id, ag_info in ad_group_list:
+                    if limit and stats['ad_groups_analyzed'] >= limit:
+                        break
+
+                    stats['ad_groups_analyzed'] += 1
+
+                    ag_labels = ag_labels_map.get(ag_id, set())
+                    ads_list = all_ads_map.get(ag_id, [])
+
+                    # Build ad labels map for this ad group
+                    ad_labels_for_ag = {}
+                    for ad_id, ad_resource in ads_list:
+                        ad_labels_for_ag[ad_id] = all_ad_labels_map.get(ad_id, set())
+
+                    # Determine missing themes for this ad group
+                    ag_missing_themes = []
+                    for theme in selected_themes:
+                        theme_label = get_theme_label(theme)
+                        done_label = f"{theme_label}_DONE"
+
+                        # Check if theme is missing
+                        has_done_label = done_label in ag_labels
+                        has_theme_ad = any(theme_label in labels for labels in ad_labels_for_ag.values())
+
+                        if not has_done_label and not has_theme_ad:
+                            # Theme is missing
+                            ag_missing_themes.append(theme)
+                            stats['missing_by_theme'][theme] += 1
+
+                            # Add to job list for this theme
+                            missing_by_theme[theme].append({
+                                'customer_id': ag_info['customer_id'],
+                                'campaign_id': ag_info['campaign_id'],
+                                'campaign_name': ag_info['campaign_name'],
+                                'ad_group_id': ag_info['ad_group_id'],
+                                'ad_group_name': ag_info['ad_group_name'],
+                                'theme_name': theme
+                            })
+
+                    if ag_missing_themes:
+                        stats['ad_groups_with_missing_themes'] += 1
+                        logger.info(f"    Ad group {ag_id}: Missing themes: {ag_missing_themes}")
+
+            except Exception as e:
+                logger.error(f"Customer {customer_id}: Error processing: {e}", exc_info=True)
+                continue
+
+        # Step 4: Create jobs per theme
+        job_ids_by_theme = {}
+        for theme, ad_groups_list in missing_by_theme.items():
+            if not ad_groups_list:
+                logger.info(f"No missing ad groups for theme '{theme}'")
+                continue
+
+            logger.info(f"Creating jobs for theme '{theme}' with {len(ad_groups_list)} ad groups")
+
+            # Split into jobs based on job_chunk_size
+            num_chunks = (len(ad_groups_list) + job_chunk_size - 1) // job_chunk_size
+            job_ids_by_theme[theme] = []
+
+            for chunk_idx in range(num_chunks):
+                start_idx = chunk_idx * job_chunk_size
+                end_idx = min(start_idx + job_chunk_size, len(ad_groups_list))
+                chunk_data = ad_groups_list[start_idx:end_idx]
+
+                # Create job
+                job_id = self.create_job(chunk_data, batch_size=batch_size, is_repair_job=False)
+                job_ids_by_theme[theme].append(job_id)
+                logger.info(f"Created job {job_id} for theme '{theme}' with {len(chunk_data)} items")
+
+                # Automatically start the first job
+                if chunk_idx == 0 and background_tasks:
+                    background_tasks.add_task(self.process_job, job_id)
+
+            stats['jobs_created_by_theme'][theme] = len(job_ids_by_theme[theme])
+
+        logger.info(f"All-themes discovery completed: {stats}")
+
+        return {
+            'status': 'completed',
+            'stats': stats,
+            'job_ids_by_theme': job_ids_by_theme
+        }
+
+    async def activate_ads_per_plan(
+        self,
+        client,
+        customer_ids: Optional[List[str]] = None,
+        batch_size: int = 5000,
+        reset_labels: bool = False
+    ) -> Dict:
+        """
+        Activate the correct theme ad per customer based on activation plan.
+        Pauses all ads first, then activates the correct theme ad.
+
+        Args:
+            client: Google Ads API client
+            customer_ids: Optional list of customer IDs to process (None = all in plan)
+            batch_size: Batch size for API queries
+            reset_labels: If True, reprocess ad groups with ACTIVATION_DONE label
+
+        Returns:
+            Dict with statistics and missing ads list
+        """
+        from backend.database import get_activation_plan, add_activation_missing_ad, clear_activation_missing_ads
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent / "thema_ads_optimized"))
+        from themes import get_theme_label
+
+        logger.info(f"Starting ad activation: customer_ids={customer_ids}, reset_labels={reset_labels}")
+
+        # Clear old missing ads records
+        clear_activation_missing_ads()
+
+        # Get activation plan
+        plan = get_activation_plan(customer_ids)
+        if not plan:
+            return {
+                'status': 'error',
+                'message': 'No activation plan found. Please upload an activation plan first.',
+                'stats': {}
+            }
+
+        logger.info(f"Loaded activation plan for {len(plan)} customers")
+
+        ga_service = client.get_service("GoogleAdsService")
+        ad_group_ad_service = client.get_service("AdGroupAdService")
+        ad_group_label_service = client.get_service("AdGroupLabelService")
+        label_service = client.get_service("LabelService")
+
+        stats = {
+            'customers_processed': 0,
+            'ad_groups_checked': 0,
+            'ad_groups_activated': 0,
+            'ad_groups_already_correct': 0,
+            'ad_groups_missing_theme_ad': 0,
+            'ad_groups_skipped_done_label': 0
+        }
+
+        # Ensure ACTIVATION_DONE label exists for all customers
+        activation_done_labels = {}  # customer_id -> label_resource
+        for customer_id in plan.keys():
+            try:
+                # Check if label exists
+                label_query = """
+                    SELECT label.resource_name
+                    FROM label
+                    WHERE label.name = 'ACTIVATION_DONE'
+                    LIMIT 1
+                """
+                label_response = ga_service.search(customer_id=customer_id, query=label_query)
+                label_found = False
+                for row in label_response:
+                    activation_done_labels[customer_id] = row.label.resource_name
+                    label_found = True
+                    break
+
+                # Create label if not found
+                if not label_found:
+                    label_operation = client.get_type("LabelOperation")
+                    label = label_operation.create
+                    label.name = "ACTIVATION_DONE"
+                    label.description = "Ad group processed by activation function"
+
+                    response = label_service.mutate_labels(
+                        customer_id=customer_id,
+                        operations=[label_operation]
+                    )
+                    activation_done_labels[customer_id] = response.results[0].resource_name
+                    logger.info(f"Created ACTIVATION_DONE label for customer {customer_id}")
+
+            except Exception as e:
+                logger.warning(f"Could not create ACTIVATION_DONE label for customer {customer_id}: {e}")
+
+        # Process each customer
+        for customer_id, required_theme in plan.items():
+            try:
+                logger.info(f"Processing customer {customer_id} - required theme: {required_theme}")
+                stats['customers_processed'] += 1
+
+                theme_label_name = get_theme_label(required_theme)
+
+                # Query ad groups in HS/ campaigns
+                ad_groups_query = """
+                    SELECT
+                        ad_group.id,
+                        ad_group.name,
+                        ad_group.resource_name,
+                        campaign.id,
+                        campaign.name
+                    FROM ad_group
+                    WHERE campaign.name LIKE 'HS/%'
+                    AND ad_group.status = 'ENABLED'
+                    AND campaign.status = 'ENABLED'
+                """
+
+                ag_response = ga_service.search(customer_id=customer_id, query=ad_groups_query)
+                ad_groups_list = []
+                for row in ag_response:
+                    ad_groups_list.append({
+                        'id': str(row.ad_group.id),
+                        'name': row.ad_group.name,
+                        'resource': row.ad_group.resource_name,
+                        'campaign_id': str(row.campaign.id),
+                        'campaign_name': row.campaign.name
+                    })
+
+                logger.info(f"  Found {len(ad_groups_list)} ad groups")
+
+                # Process each ad group
+                for ag in ad_groups_list:
+                    stats['ad_groups_checked'] += 1
+                    ag_resource = ag['resource']
+
+                    # Check for ACTIVATION_DONE label (skip if present unless reset_labels)
+                    if not reset_labels:
+                        labels_query = f"""
+                            SELECT ad_group_label.label
+                            FROM ad_group_label
+                            WHERE ad_group_label.ad_group = '{ag_resource}'
+                        """
+                        try:
+                            labels_response = ga_service.search(customer_id=customer_id, query=labels_query)
+                            has_done_label = False
+                            for label_row in labels_response:
+                                if customer_id in activation_done_labels:
+                                    if label_row.ad_group_label.label == activation_done_labels[customer_id]:
+                                        has_done_label = True
+                                        break
+
+                            if has_done_label:
+                                stats['ad_groups_skipped_done_label'] += 1
+                                continue
+                        except Exception as e:
+                            logger.warning(f"    Could not check labels for ad group {ag['id']}: {e}")
+
+                    # Query all RSA ads in ad group with their labels
+                    ads_query = f"""
+                        SELECT
+                            ad_group_ad.ad.id,
+                            ad_group_ad.ad.name,
+                            ad_group_ad.status,
+                            ad_group_ad.resource_name
+                        FROM ad_group_ad
+                        WHERE ad_group_ad.ad_group = '{ag_resource}'
+                        AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+                        AND ad_group_ad.status != REMOVED
+                    """
+
+                    ads_list = []
+                    try:
+                        ads_response = ga_service.search(customer_id=customer_id, query=ads_query)
+                        for ad_row in ads_response:
+                            ads_list.append({
+                                'id': str(ad_row.ad_group_ad.ad.id),
+                                'name': ad_row.ad_group_ad.ad.name,
+                                'status': ad_row.ad_group_ad.status.name,
+                                'resource': ad_row.ad_group_ad.resource_name,
+                                'labels': set()
+                            })
+
+                        # Query labels for each ad
+                        for ad in ads_list:
+                            ad_labels_query = f"""
+                                SELECT ad_group_ad_label.label
+                                FROM ad_group_ad_label
+                                WHERE ad_group_ad_label.ad_group_ad = '{ad['resource']}'
+                            """
+                            try:
+                                ad_labels_response = ga_service.search(customer_id=customer_id, query=ad_labels_query)
+                                for label_row in ad_labels_response:
+                                    label_res = label_row.ad_group_ad_label.label
+                                    # Get label name
+                                    label_name_query = f"""
+                                        SELECT label.name
+                                        FROM label
+                                        WHERE label.resource_name = '{label_res}'
+                                    """
+                                    label_name_response = ga_service.search(customer_id=customer_id, query=label_name_query)
+                                    for ln_row in label_name_response:
+                                        ad['labels'].add(ln_row.label.name)
+                            except Exception:
+                                pass  # Skip if label query fails
+
+                    except Exception as e:
+                        logger.warning(f"    Could not query ads for ad group {ag['id']}: {e}")
+                        continue
+
+                    if not ads_list:
+                        continue
+
+                    # Find the theme ad for required theme
+                    theme_ad = None
+                    for ad in ads_list:
+                        if theme_label_name in ad['labels']:
+                            theme_ad = ad
+                            break
+
+                    if not theme_ad:
+                        # Missing required theme ad - track and skip
+                        add_activation_missing_ad(
+                            customer_id=customer_id,
+                            campaign_id=ag['campaign_id'],
+                            campaign_name=ag['campaign_name'],
+                            ad_group_id=ag['id'],
+                            ad_group_name=ag['name'],
+                            required_theme=required_theme
+                        )
+                        stats['ad_groups_missing_theme_ad'] += 1
+                        logger.info(f"    Ad group {ag['id']}: Missing {required_theme} ad - tracked")
+                        continue
+
+                    # Check if correct ad is already the only active ad
+                    active_ads = [ad for ad in ads_list if ad['status'] == 'ENABLED']
+                    if len(active_ads) == 1 and active_ads[0]['id'] == theme_ad['id']:
+                        stats['ad_groups_already_correct'] += 1
+                        logger.info(f"    Ad group {ag['id']}: Already correct - skipped")
+                        continue
+
+                    # Activate: pause all ads, then enable the correct one
+                    try:
+                        operations = []
+
+                        # Step 1: Pause all enabled ads
+                        for ad in ads_list:
+                            if ad['status'] == 'ENABLED':
+                                operation = client.get_type("AdGroupAdOperation")
+                                ad_group_ad = operation.update
+                                ad_group_ad.resource_name = ad['resource']
+                                ad_group_ad.status = client.enums.AdGroupAdStatusEnum.PAUSED
+                                operation.update_mask = client.get_type("FieldMask").pb(paths=["status"])
+                                operations.append(operation)
+
+                        # Execute pause operations
+                        if operations:
+                            ad_group_ad_service.mutate_ad_group_ads(
+                                customer_id=customer_id,
+                                operations=operations
+                            )
+                            logger.info(f"    Ad group {ag['id']}: Paused {len(operations)} ads")
+
+                        # Step 2: Enable the correct theme ad
+                        enable_operation = client.get_type("AdGroupAdOperation")
+                        ad_group_ad = enable_operation.update
+                        ad_group_ad.resource_name = theme_ad['resource']
+                        ad_group_ad.status = client.enums.AdGroupAdStatusEnum.ENABLED
+                        enable_operation.update_mask = client.get_type("FieldMask").pb(paths=["status"])
+
+                        ad_group_ad_service.mutate_ad_group_ads(
+                            customer_id=customer_id,
+                            operations=[enable_operation]
+                        )
+                        logger.info(f"    Ad group {ag['id']}: Activated {required_theme} ad")
+
+                        # Step 3: Add ACTIVATION_DONE label
+                        if customer_id in activation_done_labels:
+                            label_operation = client.get_type("AdGroupLabelOperation")
+                            ad_group_label = label_operation.create
+                            ad_group_label.ad_group = ag_resource
+                            ad_group_label.label = activation_done_labels[customer_id]
+
+                            try:
+                                ad_group_label_service.mutate_ad_group_labels(
+                                    customer_id=customer_id,
+                                    operations=[label_operation]
+                                )
+                            except Exception as e:
+                                # Ignore if label already exists
+                                if "ALREADY_EXISTS" not in str(e):
+                                    logger.warning(f"    Could not add ACTIVATION_DONE label: {e}")
+
+                        stats['ad_groups_activated'] += 1
+
+                    except Exception as e:
+                        logger.error(f"    Failed to activate ad in ad group {ag['id']}: {e}")
+                        continue
+
+                logger.info(f"Customer {customer_id}: Completed")
+
+            except Exception as e:
+                logger.error(f"Customer {customer_id}: Error: {e}", exc_info=True)
+                continue
+
+        logger.info(f"Ad activation completed: {stats}")
+
+        return {
+            'status': 'completed',
+            'stats': stats
+        }
+
     async def _start_next_job_if_queue_enabled(self):
         """Check if auto-queue is enabled and start the next pending job."""
         from backend.database import get_auto_queue_enabled
