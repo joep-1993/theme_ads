@@ -76,28 +76,28 @@ def load_theme_content(theme_name: str) -> ThemeContent:
     if theme_name == "singles_day":
         # Create legacy content for Singles Day
         headlines = [
-            '"{KeyWord:Singles Day Deal}"',
-            '"Singles Day in {=COUNTDOWN("2025/11/11 00:00:00","nl")}"',
-            '"{KeyWord:Singles Day Deals} Online"',
-            '"Bestel {KeyWord:Vandaag} met Korting"',
-            '"{KeyWord:Aanbieding} – Gratis Verzending"',
-            '"Top {KeyWord:Acties} – Shop Nu"',
-            '"{KeyWord:Sale} Niet Missen!"',
-            '"Nog {=COUNTDOWN("2025/11/11 00:00:00","nl")} Tot Singles Day"',
-            '"Singles Day – Eindigt Over {=COUNTDOWN("2025/11/11 00:00:00","nl")}"',
-            '"Shop Nu – {=COUNTDOWN("2025/11/11 00:00:00","nl")} Te Gaan"',
-            '"Singles Day Start In {=COUNTDOWN("2025/11/11 00:00:00","nl")}"',
-            '"{KeyWord:Singles Day} – Nog {=COUNTDOWN("2025/11/11 00:00:00","nl")}"',
-            '"{KeyWord:Aanbieding} Eindigt Over {=COUNTDOWN("2025/11/11 00:00:00","nl")}"',
-            '"Snel! {KeyWord:Sale} – {=COUNTDOWN("2025/11/11 00:00:00","nl")} Te Gaan"',
-            '"{KeyWord:Acties} Starten In {=COUNTDOWN("2025/11/11 00:00:00","nl")}"'
+            '{KeyWord:Singles Day Deal}',
+            'Singles Day in {COUNTDOWN(2025-11-11 00:00:00,5)}',
+            '{KeyWord:Singles Day Deals} Online',
+            'Bestel {KeyWord:Vandaag}!',
+            '{KeyWord:Deal} Shop nu!',
+            'Top {KeyWord:Acties} – Shop Nu',
+            '{KeyWord:Sale} Niet Missen!',
+            'Nog {COUNTDOWN(2025-11-11 00:00:00,5)} Tot Singles Day',
+            'Eindigt Over {COUNTDOWN(2025-11-11 00:00:00,5)}',
+            'Shop Nu – {COUNTDOWN(2025-11-11 00:00:00,5)} Te Gaan',
+            'Singles Day Start In {COUNTDOWN(2025-11-11 00:00:00,5)}',
+            '{KeyWord:Singles Day} – Nog {COUNTDOWN(2025-11-11 00:00:00,5)}',
+            '{KeyWord:Aanbieding} Nog {COUNTDOWN(2025-11-11 00:00:00,5)}',
+            '{KeyWord:Sale} – {COUNTDOWN(2025-11-11 00:00:00,5)}',
+            '{KeyWord:Acties} Starten In {COUNTDOWN(2025-11-11 00:00:00,5)}'
         ]
 
         descriptions = [
-            '"{KeyWord:Singles Day Deals} nu met hoge korting. Alleen échte SD deals – geen nepprijzen!"',
-            '"Scoor {KeyWord:Aanbiedingen} tijdens Singles Day. Alleen échte SD deals, op=op!"',
-            '"{KeyWord:Singles Day Deals} nu live. Nog {=COUNTDOWN("2025/11/11 00:00:00","nl")}! Alleen échte SD deals."',
-            '"Scoor {KeyWord:Aanbiedingen} voor Singles Day. {=COUNTDOWN("2025/11/11 00:00:00","nl")} te gaan – geen nepdeals!"'
+            '{KeyWord:Singles Day Deals} nu met hoge korting. Alleen échte SD deals – geen nepprijzen!',
+            'Scoor {KeyWord:Aanbiedingen} tijdens Singles Day. Alleen échte SD deals, op=op!',
+            '{KeyWord:Singles Day Deals} nu live. Nog {COUNTDOWN(2025-11-11 00:00:00,5)}! Alleen échte SD deals.',
+            'Scoor {KeyWord:Aanbiedingen} voor Singles Day. {COUNTDOWN(2025-11-11 00:00:00,5)} te gaan – geen nepdeals!'
         ]
     else:
         # Load from theme files

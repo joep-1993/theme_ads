@@ -6,7 +6,7 @@
         "Top {KeyWord:Acties} – Shop Nu",
         "{KeyWord:Sale} Niet Missen!",
         "Nog {COUNTDOWN(2025-12-01 00:00:00,5)} Tot Cyber Monday",
-        "Cyber Monday – Eindigt Over {COUNTDOWN(2025-12-01 00:00:00,5)}",
+        "Eindigt Over {COUNTDOWN(2025-12-01 00:00:00,5)}",
         "Shop Nu – {COUNTDOWN(2025-12-01 00:00:00,5)} Te Gaan",
         "Cyber Monday Start In {COUNTDOWN(2025-12-01 00:00:00,5)}",
         "{KeyWord:Cyber Monday} – Nog {COUNTDOWN(2025-12-01 00:00:00,5)}",

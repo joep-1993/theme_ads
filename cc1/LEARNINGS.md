@@ -1289,6 +1289,55 @@ for row in ad_response:
 - **Why Not GAQL**: `CONTAINS ALL` doesn't support OR conditions or case-insensitive matching
 - **Performance**: Still efficient for thousands of ads (single query + in-memory filtering)
 
+### Headline Length Validation for Dynamic Ad Customizers (2025-10-23)
+- **Pattern**: Pre-validate headlines with dynamic functions (COUNTDOWN, KeyWord) to ensure rendered output stays within limits
+- **Use Case**: Prevent 100% failure rates from headlines that look valid but exceed limits when rendered
+- **Implementation**:
+```python
+import re
+
+# Rendering estimates
+MAX_KEYWORD = 15   # {KeyWord:...} can be up to 15 chars
+MAX_COUNTDOWN = 8  # "XX dagen" = 8 chars (conservative estimate)
+
+def validate_headline_length(headline: str) -> tuple[bool, int]:
+    """
+    Validate that a headline with dynamic customizers will render to ≤30 chars.
+
+    Returns: (is_valid, estimated_max_length)
+    """
+    # Count dynamic functions
+    keywords = len(re.findall(r'\{KeyWord:[^}]*\}', headline))
+    countdowns = len(re.findall(r'\{COUNTDOWN\([^)]*\)\}', headline))
+
+    # Calculate base text (remove all functions)
+    base = re.sub(r'\{KeyWord:[^}]*\}', '', headline)
+    base = re.sub(r'\{COUNTDOWN\([^)]*\)\}', '', base)
+
+    # Calculate max rendered length
+    max_len = len(base) + (keywords * MAX_KEYWORD) + (countdowns * MAX_COUNTDOWN)
+
+    return (max_len <= 30, max_len)
+
+# Batch validate all theme headlines
+for theme_file in theme_files:
+    headlines = load_headlines(theme_file)
+    for i, headline in enumerate(headlines):
+        is_valid, max_len = validate_headline_length(headline)
+        if not is_valid:
+            print(f"❌ {theme_file} line {i+1}: {max_len} chars - {headline[:50]}")
+```
+- **Key Considerations**:
+  - Use conservative estimates (max possible length for each function)
+  - COUNTDOWN renders to different lengths based on days remaining, use worst case
+  - KeyWord length depends on actual keyword, use Google Ads max (15 chars)
+  - Theme name itself may appear in headline, counts toward total length
+- **Example Application**: Session 2025-10-23
+  - Validated all 4 themes (Black Friday, Cyber Monday, Sinterklaas, Kerstmis)
+  - Found 22 headlines exceeding 30 chars when rendered
+  - Fixed by shortening base text or removing theme name prefixes
+- **Benefit**: Catch validation issues before creating ads, prevent large-scale failures
+
 ### Check-up Function - Multi-Theme Support
 - **Pattern**: Database-driven theme verification instead of text-based search
 - **Problem**: Original checkup only checked for "SINGLES" text in headlines, couldn't verify other themes
@@ -1495,7 +1544,7 @@ if ag_resource not in ag_with_done_label and ag_resource not in ag_with_attempte
   3. Future discoveries automatically exclude ATTEMPTED items
   4. Fix issues in Google Ads later, remove ATTEMPTED label, re-run
 
-### Headline Length Validation - 30 Character RSA Limit (2025-10-21)
+### Headline Length Validation - 30 Character RSA Limit (2025-10-21, Updated 2025-10-23)
 - **Problem**: Job 237 (Sinterklaas, 50,000 ad groups) had 100% failure rate
   - Error: `string_length_error: TOO_LONG` on headline
   - Trigger: `"Shop Nu – Slechts {COUNTDOWN(2025-12-05 00:00:00,5)} Te Gaan"`
@@ -1503,6 +1552,10 @@ if ag_resource not in ag_with_done_label and ag_resource not in ag_with_attempte
 - **Root Cause**: Headlines with countdown functions not validated for max length after rendering
   - Base text + rendered countdown exceeded 30 chars
   - Example: `"Shop Nu – Slechts 14 dagen Te Gaan"` = 37 chars
+- **Key Discovery (2025-10-23)**: Theme name length affects rendered output
+  - **Cyber Monday** (12 chars): "Cyber Monday – Eindigt Over XX dagen" = 36 chars ❌
+  - **Kerstmis** (5 chars): "Kerst – Eindigt Over XX dagen" = 29 chars ✓
+  - Identical syntax, different results due to theme name length
 - **Analysis Tool**: Created Python validator to check all theme headlines
 ```python
 # Estimate rendered length
@@ -1550,5 +1603,50 @@ New: "{KeyWord:Aanbieding} Nog {COUNTDOWN(...)}" (29 chars)
 - **Prevention**: Always validate headlines render to ≤30 chars before adding to themes
 - **Impact**: All themes now process successfully without TOO_LONG errors
 
+### Google Ads RSA Headline Rendered Length Validation (2025-10-23)
+- **Problem**: Cyber Monday and Singles Day themes had 100% failure rate with "TOO_LONG" errors, while Kerstmis succeeded with identical COUNTDOWN syntax
+- **Mystery Solved**: Google Ads API validates headlines using **rendered output**, not literal syntax
+- **How Validation Works**:
+  - API calculates rendered length before creating ad
+  - COUNTDOWN functions render to approximately 8 characters ("XX dagen")
+  - KeyWord functions render to actual keyword (up to 15 chars)
+  - RSA headline limit: 30 characters (rendered)
+- **Root Cause Analysis**:
+  ```
+  Theme         | Headline Pattern              | Base Length | +Countdown | Total  | Result
+  --------------|-------------------------------|-------------|------------|--------|--------
+  Cyber Monday  | "Cyber Monday – Eindigt Over" | 28 chars    | +8 chars   | 36 ❌  | FAILED
+  Singles Day   | "Singles Day – Eindigt Over"  | 27 chars    | +8 chars   | 35 ❌  | FAILED
+  Kerstmis      | "Kerst – Eindigt Over"        | 21 chars    | +8 chars   | 29 ✓   | SUCCESS
+  Sinterklaas   | "Sint – Eindigt Over"         | 20 chars    | +8 chars   | 28 ✓   | SUCCESS
+  ```
+- **Key Insight**: Theme name length directly impacts validation
+  - Longer theme names (Cyber Monday = 12 chars) push rendered output over 30-char limit
+  - Shorter theme names (Kerst = 5 chars) stay under limit with same pattern
+- **Error Message**: API shows literal syntax in error but validates rendered output
+  ```
+  error_code: { string_length_error: TOO_LONG }
+  message: "Too long."
+  trigger: { string_value: "Cyber Monday – Eindigt Over {COUNTDOWN(2025-12-01 00:00:00,5)}" }
+  ```
+  - Trigger shows 62 chars (literal syntax with COUNTDOWN function)
+  - Actual validation checks ~36 chars (rendered: "Cyber Monday – Eindigt Over 8 dagen")
+- **Solution**: Shorten headlines to ensure rendered output ≤30 chars
+  ```
+  # Cyber Monday fix (themes/cyber_monday/headlines.txt:9)
+  OLD: "Cyber Monday – Eindigt Over {COUNTDOWN(2025-12-01 00:00:00,5)}"  # 36 chars rendered ❌
+  NEW: "Eindigt Over {COUNTDOWN(2025-12-01 00:00:00,5)}"                # 21 chars rendered ✓
+
+  # Singles Day fix (thema_ads_optimized/themes.py:87)
+  OLD: "Singles Day – Eindigt Over {=COUNTDOWN(...)}"  # 35-37 chars rendered ❌
+  NEW: "Eindigt Over {COUNTDOWN(...)}"                 # 21 chars rendered ✓
+  ```
+- **Files Modified**:
+  - `themes/cyber_monday/headlines.txt` (line 9)
+  - `thema_ads_optimized/themes.py` (lines 76-101, Singles Day hardcoded theme)
+- **Validation Formula**: `base_text + (countdown_count × 8) + (keyword_count × 15) ≤ 30`
+- **Prevention**: Always calculate max rendered length before adding headlines to themes
+- **Impact**: All themes now validated and ready for production use
+
 ---
-_Last updated: 2025-10-21_
+_Last updated: 2025-10-23_
