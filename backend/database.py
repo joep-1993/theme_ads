@@ -234,5 +234,128 @@ def set_auto_queue_enabled(enabled: bool):
         conn.close()
 
 
+def store_activation_plan(plan_data: dict, reset_labels: bool = False):
+    """
+    Store activation plan in database.
+
+    Args:
+        plan_data: Dict of customer_id -> theme_name mappings
+        reset_labels: If True, removes ACTIVATION_DONE labels from customers in plan
+
+    Returns:
+        Number of customers in plan
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        # Clear existing plan
+        cur.execute("DELETE FROM activation_plan")
+
+        # Insert new plan
+        for customer_id, theme_name in plan_data.items():
+            cur.execute("""
+                INSERT INTO activation_plan (customer_id, theme_name, uploaded_at, updated_at)
+                VALUES (%s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (customer_id)
+                DO UPDATE SET theme_name = EXCLUDED.theme_name,
+                             updated_at = CURRENT_TIMESTAMP
+            """, (customer_id, theme_name))
+
+        conn.commit()
+        logger.info(f"Stored activation plan with {len(plan_data)} customers")
+
+        return len(plan_data)
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_activation_plan(customer_ids: list = None):
+    """
+    Get activation plan from database.
+
+    Args:
+        customer_ids: Optional list of customer IDs to filter by
+
+    Returns:
+        Dict of customer_id -> theme_name mappings
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        if customer_ids:
+            cur.execute("""
+                SELECT customer_id, theme_name
+                FROM activation_plan
+                WHERE customer_id = ANY(%s)
+            """, (customer_ids,))
+        else:
+            cur.execute("SELECT customer_id, theme_name FROM activation_plan")
+
+        plan = {row['customer_id']: row['theme_name'] for row in cur.fetchall()}
+        return plan
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+def clear_activation_missing_ads():
+    """Clear all missing ads records."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("DELETE FROM activation_missing_ads")
+        conn.commit()
+        logger.info("Cleared activation_missing_ads table")
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+def add_activation_missing_ad(customer_id: str, campaign_id: str, campaign_name: str,
+                              ad_group_id: str, ad_group_name: str, required_theme: str):
+    """Add a record for an ad group missing required theme ad."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            INSERT INTO activation_missing_ads
+                (customer_id, campaign_id, campaign_name, ad_group_id, ad_group_name, required_theme)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (customer_id, campaign_id, campaign_name, ad_group_id, ad_group_name, required_theme))
+
+        conn.commit()
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_activation_missing_ads():
+    """Get all missing ads records."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            SELECT customer_id, campaign_id, campaign_name, ad_group_id, ad_group_name, required_theme, detected_at
+            FROM activation_missing_ads
+            ORDER BY customer_id, ad_group_id
+        """)
+
+        return cur.fetchall()
+
+    finally:
+        cur.close()
+        conn.close()
+
+
 if __name__ == "__main__":
     init_db()

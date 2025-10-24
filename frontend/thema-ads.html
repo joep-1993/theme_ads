@@ -40,6 +40,12 @@
                             <li class="nav-item">
                                 <a class="nav-link text-white" id="checkup-tab" data-bs-toggle="tab" href="#checkup" role="tab">Check-up</a>
                             </li>
+                            <li class="nav-item">
+                                <a class="nav-link text-white" id="run-all-themes-tab" data-bs-toggle="tab" href="#runAllThemes" role="tab">Run All Themes</a>
+                            </li>
+                            <li class="nav-item">
+                                <a class="nav-link text-white" id="activate-ads-tab" data-bs-toggle="tab" href="#activateAds" role="tab">Activate Ads</a>
+                            </li>
                         </ul>
                     </div>
                     <div class="card-body">
@@ -198,6 +204,166 @@
                                     <i class="bi bi-check-circle"></i> Run Check-up
                                 </button>
                                 <div id="checkupResult" class="mt-3"></div>
+                            </div>
+
+                            <!-- Run All Themes Tab -->
+                            <div class="tab-pane fade" id="runAllThemes" role="tabpanel">
+                                <h6>Run All Themes - Complete Theme Coverage</h6>
+                                <p class="text-muted">
+                                    Discover all ad groups and add ALL missing theme ads:<br>
+                                    <small>
+                                        • Finds all customers matching the filter<br>
+                                        • Discovers all ad groups in HS/ campaigns<br>
+                                        • Checks which themes are missing (no DONE label + no theme ads)<br>
+                                        • <strong>Prevents duplicates:</strong> detects existing theme ads even without DONE labels<br>
+                                        • Creates one job per theme for easy tracking<br>
+                                        • Use this to ensure complete theme coverage across all ad groups
+                                    </small>
+                                </p>
+                                <div class="mb-3">
+                                    <label for="allThemesCustomerFilter" class="form-label">Customer Filter</label>
+                                    <input type="text" class="form-control" id="allThemesCustomerFilter" value="Beslist.nl -" style="max-width: 300px;">
+                                    <small class="text-muted">Only process customers with names starting with this text</small>
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label">Select Themes to Process</label>
+                                    <div id="allThemesCheckboxes">
+                                        <!-- Dynamically populated -->
+                                    </div>
+                                    <small class="text-muted">Select which themes to add to ad groups</small>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="allThemesLimit" class="form-label">Limit (optional)</label>
+                                    <input type="number" class="form-control" id="allThemesLimit" placeholder="Leave empty for no limit" min="1" max="100000" style="max-width: 300px;">
+                                    <small class="text-muted">Recommended: Start with 10-50 for testing</small>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="allThemesBatchSize" class="form-label">Batch Size</label>
+                                    <input type="number" class="form-control" id="allThemesBatchSize" value="5000" min="1000" max="10000" style="max-width: 300px;">
+                                    <small class="text-muted">Number of items per API batch query (1000-10000, default: 5000)</small>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="allThemesJobChunkSize" class="form-label">Job Chunk Size</label>
+                                    <input type="number" class="form-control" id="allThemesJobChunkSize" value="50000" min="10000" max="100000" step="10000" style="max-width: 300px;">
+                                    <small class="text-muted">Max items per job (10k-100k, default: 50k)</small>
+                                </div>
+                                <button class="btn btn-primary" onclick="runAllThemes()" id="runAllThemesBtn">
+                                    <i class="bi bi-lightning-fill"></i> Discover & Create Jobs
+                                </button>
+                                <div id="allThemesResult" class="mt-3"></div>
+                            </div>
+
+                            <!-- Activate Ads Tab -->
+                            <div class="tab-pane fade" id="activateAds" role="tabpanel">
+                                <h6>Activate Ads - Plan-Based Ad Activation</h6>
+                                <p class="text-muted">
+                                    Activate the correct theme ad per customer based on your activation plan:<br>
+                                    <small>
+                                        • First, upload your activation plan (Excel with customer_id + theme)<br>
+                                        • Then, run activation to pause all ads and enable only the correct theme ad<br>
+                                        • <strong>Safe operation:</strong> pauses all ads first, then activates correct ad<br>
+                                        • Tracks ad groups missing the required theme ad for separate processing<br>
+                                        • Skips ad groups already processed (unless "Reset Labels" is checked)
+                                    </small>
+                                </p>
+
+                                <!-- Upload Plan Section -->
+                                <div class="card mb-3">
+                                    <div class="card-header">
+                                        <strong>Step 1: Upload Activation Plan</strong>
+                                    </div>
+                                    <div class="card-body">
+                                        <p class="text-muted">
+                                            Upload an Excel file with <code>customer_id</code> and <code>theme</code> columns.<br>
+                                            This defines which theme should be active for each customer.
+                                        </p>
+                                        <div class="mb-3">
+                                            <label for="activationPlanFile" class="form-label">Select Excel File</label>
+                                            <input type="file" class="form-control" id="activationPlanFile" accept=".xlsx,.xls" style="max-width: 400px;">
+                                        </div>
+                                        <div class="form-check mb-3">
+                                            <input class="form-check-input" type="checkbox" id="resetActivationLabels">
+                                            <label class="form-check-label" for="resetActivationLabels">
+                                                Reset activation labels (reprocess all ad groups)
+                                            </label>
+                                            <small class="text-muted d-block">Check this to reprocess ad groups that were already activated</small>
+                                        </div>
+                                        <button class="btn btn-primary" onclick="uploadActivationPlan()" id="uploadPlanBtn">
+                                            <i class="bi bi-upload"></i> Upload Plan
+                                        </button>
+                                        <div id="uploadPlanResult" class="mt-3"></div>
+                                    </div>
+                                </div>
+
+                                <!-- Current Plan Display -->
+                                <div class="card mb-3">
+                                    <div class="card-header">
+                                        <strong>Current Activation Plan</strong>
+                                        <button class="btn btn-sm btn-outline-primary float-end" onclick="loadActivationPlan()">
+                                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                                        </button>
+                                    </div>
+                                    <div class="card-body">
+                                        <div id="currentPlan">Loading...</div>
+                                    </div>
+                                </div>
+
+                                <!-- Activate Section -->
+                                <div class="card mb-3">
+                                    <div class="card-header">
+                                        <strong>Step 2: Activate Ads</strong>
+                                    </div>
+                                    <div class="card-body">
+                                        <p class="text-muted">
+                                            Run activation to pause all ads and enable the correct theme ad per the plan.
+                                        </p>
+                                        <div class="mb-3">
+                                            <label for="activateCustomerIds" class="form-label">Customer IDs (optional)</label>
+                                            <input type="text" class="form-control" id="activateCustomerIds" placeholder="Leave empty to process all customers in plan" style="max-width: 500px;">
+                                            <small class="text-muted">Comma-separated list (e.g., 1234567890,9876543210)</small>
+                                        </div>
+                                        <div class="form-check mb-3">
+                                            <input class="form-check-input" type="checkbox" id="activateResetLabels">
+                                            <label class="form-check-label" for="activateResetLabels">
+                                                Reset labels (reprocess ad groups with ACTIVATION_DONE label)
+                                            </label>
+                                        </div>
+                                        <button class="btn btn-success" onclick="activateAds()" id="activateAdsBtn">
+                                            <i class="bi bi-play-circle"></i> Activate Ads
+                                        </button>
+                                        <div id="activateResult" class="mt-3"></div>
+                                    </div>
+                                </div>
+
+                                <!-- Missing Ads Section -->
+                                <div class="card mb-3" id="missingAdsCard" style="display: none;">
+                                    <div class="card-header bg-warning">
+                                        <strong>Ad Groups Missing Required Theme Ads</strong>
+                                    </div>
+                                    <div class="card-body">
+                                        <p class="text-muted">
+                                            These ad groups don't have the theme ad specified in the plan.<br>
+                                            Download the CSV and upload via "Upload Ad Groups" to add the missing theme ads.
+                                        </p>
+                                        <button class="btn btn-warning" onclick="downloadMissingAds()">
+                                            <i class="bi bi-download"></i> Download Missing Ads CSV
+                                        </button>
+                                        <div class="table-responsive mt-3">
+                                            <table class="table table-sm" id="missingAdsTable">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Customer ID</th>
+                                                        <th>Campaign</th>
+                                                        <th>Ad Group</th>
+                                                        <th>Required Theme</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody id="missingAdsTableBody">
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>

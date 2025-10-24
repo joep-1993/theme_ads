@@ -28,6 +28,7 @@ document.addEventListener('DOMContentLoaded', function() {
     loadThemes();
     loadQueueStatus();
     refreshJobs();
+    loadActivationPlan();
     // Auto-refresh jobs every 5 seconds
     setInterval(refreshJobs, 5000);
     // Auto-refresh queue status every 10 seconds
@@ -72,6 +73,19 @@ async function loadThemes() {
             if (csvThemeSelect) {
                 csvThemeSelect.innerHTML = themes.map(t =>
                     `<option value="${t.name}" ${t.name === 'singles_day' ? 'selected' : ''}>${t.display_name}</option>`
+                ).join('');
+            }
+
+            // Populate theme checkboxes for Run All Themes
+            const allThemesCheckboxes = document.getElementById('allThemesCheckboxes');
+            if (allThemesCheckboxes) {
+                allThemesCheckboxes.innerHTML = themes.map(t =>
+                    `<div class="form-check">
+                        <input class="form-check-input all-themes-checkbox" type="checkbox" value="${t.name}" id="theme_${t.name}" checked>
+                        <label class="form-check-label" for="theme_${t.name}">
+                            ${t.display_name}
+                        </label>
+                    </div>`
                 ).join('');
             }
         }
@@ -578,5 +592,287 @@ async function toggleAutoQueue() {
         // Revert toggle on error
         toggle.checked = !enabled;
         alert(`Error: ${error.message}`);
+    }
+}
+
+async function uploadActivationPlan() {
+    const fileInput = document.getElementById('activationPlanFile');
+    const resetLabels = document.getElementById('resetActivationLabels').checked;
+    const resultDiv = document.getElementById('uploadPlanResult');
+    const btn = document.getElementById('uploadPlanBtn');
+
+    if (!fileInput.files.length) {
+        resultDiv.innerHTML = '<div class="alert alert-danger">Please select an Excel file</div>';
+        return;
+    }
+
+    btn.disabled = true;
+    resultDiv.innerHTML = '<div class="alert alert-info">Uploading activation plan...</div>';
+
+    try {
+        const formData = new FormData();
+        formData.append('file', fileInput.files[0]);
+        formData.append('is_activation_plan', 'true');
+        formData.append('reset_activation_labels', resetLabels ? 'true' : 'false');
+
+        const response = await fetch('/api/thema-ads/upload-excel', {
+            method: 'POST',
+            body: formData
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            let resultHTML = '<div class="alert alert-success">';
+            resultHTML += `<h5>${data.message}</h5>`;
+            resultHTML += `<strong>Customers in plan:</strong> ${data.customers_in_plan}<br>`;
+            if (data.reset_labels) {
+                resultHTML += '<strong>Activation labels reset:</strong> Yes<br>';
+            }
+            resultHTML += '</div>';
+            resultDiv.innerHTML = resultHTML;
+
+            // Reload current plan
+            await loadActivationPlan();
+        } else {
+            resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.detail}</div>`;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function loadActivationPlan() {
+    const planDiv = document.getElementById('currentPlan');
+    if (!planDiv) return;
+
+    try {
+        const response = await fetch('/api/thema-ads/activation-plan');
+        const data = await response.json();
+
+        if (response.ok && data.customer_count > 0) {
+            let html = `<p><strong>${data.customer_count} customers in plan</strong></p>`;
+            html += '<div class="table-responsive" style="max-height: 300px; overflow-y: auto;">';
+            html += '<table class="table table-sm">';
+            html += '<thead><tr><th>Customer ID</th><th>Theme</th></tr></thead>';
+            html += '<tbody>';
+            for (const [customerId, theme] of Object.entries(data.plan)) {
+                const themeName = themes.find(t => t.name === theme)?.display_name || theme;
+                html += `<tr><td>${customerId}</td><td>${themeName}</td></tr>`;
+            }
+            html += '</tbody></table></div>';
+            planDiv.innerHTML = html;
+        } else {
+            planDiv.innerHTML = '<p class="text-muted">No activation plan uploaded yet. Upload an Excel file with customer_id and theme columns.</p>';
+        }
+    } catch (error) {
+        planDiv.innerHTML = '<p class="text-danger">Error loading plan</p>';
+    }
+}
+
+async function activateAds() {
+    const customerIdsInput = document.getElementById('activateCustomerIds').value;
+    const resetLabels = document.getElementById('activateResetLabels').checked;
+    const resultDiv = document.getElementById('activateResult');
+    const btn = document.getElementById('activateAdsBtn');
+
+    btn.disabled = true;
+    resultDiv.innerHTML = `
+        <div class="alert alert-info">
+            <strong>Activating ads...</strong><br>
+            This may take several minutes depending on the number of ad groups.<br>
+            Please wait...
+        </div>
+    `;
+
+    try {
+        // Parse customer IDs if provided
+        let customerIds = null;
+        if (customerIdsInput.trim()) {
+            customerIds = customerIdsInput.split(',').map(id => id.trim()).filter(id => id);
+        }
+
+        // Build query parameters
+        const params = new URLSearchParams();
+        if (resetLabels) params.append('reset_labels', 'true');
+        if (customerIds) {
+            customerIds.forEach(id => params.append('customer_ids', id));
+        }
+
+        const response = await fetch(`/api/thema-ads/activate-ads?${params.toString()}`, {
+            method: 'POST'
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.status === 'completed') {
+            const stats = data.stats;
+
+            let resultHTML = '<div class="alert alert-success">';
+            resultHTML += '<h5>Ad Activation Completed!</h5>';
+            resultHTML += '<hr>';
+            resultHTML += `<strong>Customers Processed:</strong> ${stats.customers_processed}<br>`;
+            resultHTML += `<strong>Ad Groups Checked:</strong> ${stats.ad_groups_checked}<br>`;
+            resultHTML += `<strong>Ad Groups Activated:</strong> ${stats.ad_groups_activated}<br>`;
+            resultHTML += `<strong>Already Correct:</strong> ${stats.ad_groups_already_correct}<br>`;
+            resultHTML += `<strong>Skipped (Done Label):</strong> ${stats.ad_groups_skipped_done_label}<br>`;
+            resultHTML += `<strong>Missing Theme Ad:</strong> ${stats.ad_groups_missing_theme_ad}<br>`;
+            resultHTML += '</div>';
+
+            // Show missing ads if any
+            if (stats.ad_groups_missing_theme_ad > 0) {
+                resultHTML += '<div class="alert alert-warning mt-2">';
+                resultHTML += `<strong>${stats.ad_groups_missing_theme_ad} ad groups are missing the required theme ad.</strong><br>`;
+                resultHTML += 'Check the "Missing Ads" section below to download a CSV and add the missing theme ads.';
+                resultHTML += '</div>';
+
+                // Load and display missing ads
+                await loadMissingAds();
+            }
+
+            resultDiv.innerHTML = resultHTML;
+        } else if (data.status === 'error') {
+            resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.message}</div>`;
+        } else {
+            resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.detail || 'Unknown error'}</div>`;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function loadMissingAds() {
+    try {
+        const response = await fetch('/api/thema-ads/activation-missing-ads');
+        const data = await response.json();
+
+        if (response.ok && data.count > 0) {
+            const missingAdsCard = document.getElementById('missingAdsCard');
+            const tableBody = document.getElementById('missingAdsTableBody');
+
+            // Show card
+            missingAdsCard.style.display = 'block';
+
+            // Populate table
+            tableBody.innerHTML = '';
+            data.missing_ads.forEach(ad => {
+                const themeName = themes.find(t => t.name === ad.required_theme)?.display_name || ad.required_theme;
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${ad.customer_id}</td>
+                    <td>${ad.campaign_name || ad.campaign_id}</td>
+                    <td>${ad.ad_group_name || ad.ad_group_id}</td>
+                    <td>${themeName}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+    } catch (error) {
+        console.error('Error loading missing ads:', error);
+    }
+}
+
+function downloadMissingAds() {
+    window.open('/api/thema-ads/activation-missing-ads/export', '_blank');
+}
+
+async function runAllThemes() {
+    const customerFilter = document.getElementById('allThemesCustomerFilter').value;
+    const limit = document.getElementById('allThemesLimit').value || null;
+    const batchSize = document.getElementById('allThemesBatchSize').value;
+    const jobChunkSize = document.getElementById('allThemesJobChunkSize').value;
+    const resultDiv = document.getElementById('allThemesResult');
+    const btn = document.getElementById('runAllThemesBtn');
+
+    // Get selected themes
+    const checkboxes = document.querySelectorAll('.all-themes-checkbox:checked');
+    const selectedThemes = Array.from(checkboxes).map(cb => cb.value);
+
+    if (selectedThemes.length === 0) {
+        resultDiv.innerHTML = '<div class="alert alert-danger">Please select at least one theme to process</div>';
+        return;
+    }
+
+    if (!customerFilter.trim()) {
+        resultDiv.innerHTML = '<div class="alert alert-danger">Please enter a customer filter</div>';
+        return;
+    }
+
+    btn.disabled = true;
+    resultDiv.innerHTML = `
+        <div class="alert alert-info">
+            <strong>Running all-themes discovery...</strong><br>
+            Customer Filter: ${customerFilter}<br>
+            Selected Themes: ${selectedThemes.map(t => themes.find(th => th.name === t)?.display_name || t).join(', ')}<br>
+            Limit: ${limit || 'No limit'}<br>
+            This may take a few minutes...
+        </div>
+    `;
+
+    try {
+        // Build query parameters
+        const params = new URLSearchParams();
+        params.append('customer_filter', customerFilter);
+        if (limit) params.append('limit', limit);
+        params.append('batch_size', batchSize);
+        params.append('job_chunk_size', jobChunkSize);
+
+        // Add themes as array
+        selectedThemes.forEach(theme => params.append('themes', theme));
+
+        const response = await fetch(`/api/thema-ads/run-all-themes?${params.toString()}`, {
+            method: 'POST'
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            const stats = data.stats;
+            const jobIdsByTheme = data.job_ids_by_theme;
+
+            let resultHTML = '<div class="alert alert-success">';
+            resultHTML += '<h5>All-Themes Discovery Completed!</h5>';
+            resultHTML += '<hr>';
+            resultHTML += `<strong>Customers Found:</strong> ${stats.customers_found}<br>`;
+            resultHTML += `<strong>Customers Processed:</strong> ${stats.customers_processed}<br>`;
+            resultHTML += `<strong>Ad Groups Analyzed:</strong> ${stats.ad_groups_analyzed}<br>`;
+            resultHTML += `<strong>Ad Groups with Missing Themes:</strong> ${stats.ad_groups_with_missing_themes}<br>`;
+            resultHTML += '<hr>';
+            resultHTML += '<strong>Missing Themes Breakdown:</strong><ul>';
+            for (const [theme, count] of Object.entries(stats.missing_by_theme)) {
+                const themeName = themes.find(t => t.name === theme)?.display_name || theme;
+                resultHTML += `<li>${themeName}: ${count} ad groups</li>`;
+            }
+            resultHTML += '</ul>';
+
+            // Show jobs created
+            if (Object.keys(jobIdsByTheme).length > 0) {
+                resultHTML += '<hr><strong>Jobs Created:</strong><ul>';
+                for (const [theme, jobIds] of Object.entries(jobIdsByTheme)) {
+                    const themeName = themes.find(t => t.name === theme)?.display_name || theme;
+                    resultHTML += `<li>${themeName}: ${jobIds.length} job(s) (IDs: ${jobIds.join(', ')})</li>`;
+                }
+                resultHTML += '</ul>';
+                resultHTML += '<p class="mt-2"><strong>Jobs have been created and will be processed automatically!</strong></p>';
+            } else {
+                resultHTML += '<hr><p><strong>No jobs created - all ad groups already have the selected themes!</strong></p>';
+            }
+
+            resultHTML += '</div>';
+            resultDiv.innerHTML = resultHTML;
+
+            // Refresh job list
+            refreshJobs();
+        } else {
+            resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.detail}</div>`;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
+    } finally {
+        btn.disabled = false;
     }
 }

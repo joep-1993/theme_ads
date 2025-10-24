@@ -44,3 +44,29 @@ CREATE INDEX IF NOT EXISTS idx_job_items_job_id ON thema_ads_job_items(job_id);
 CREATE INDEX IF NOT EXISTS idx_job_items_status ON thema_ads_job_items(status);
 CREATE INDEX IF NOT EXISTS idx_input_data_job_id ON thema_ads_input_data(job_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON thema_ads_jobs(status);
+
+-- Activation Plan: stores which theme should be active per customer
+CREATE TABLE IF NOT EXISTS activation_plan (
+    customer_id VARCHAR(50) PRIMARY KEY,
+    theme_name VARCHAR(50) NOT NULL,
+    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    plan_version VARCHAR(50) DEFAULT '1',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Activation Missing Ads: tracks ad groups missing required theme ads
+CREATE TABLE IF NOT EXISTS activation_missing_ads (
+    id SERIAL PRIMARY KEY,
+    customer_id VARCHAR(50) NOT NULL,
+    campaign_id VARCHAR(50),
+    campaign_name TEXT,
+    ad_group_id VARCHAR(50) NOT NULL,
+    ad_group_name TEXT,
+    required_theme VARCHAR(50) NOT NULL,
+    detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for activation tables
+CREATE INDEX IF NOT EXISTS idx_activation_plan_customer ON activation_plan(customer_id);
+CREATE INDEX IF NOT EXISTS idx_activation_missing_customer ON activation_missing_ads(customer_id);
+CREATE INDEX IF NOT EXISTS idx_activation_missing_theme ON activation_missing_ads(required_theme);

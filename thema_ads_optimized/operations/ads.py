@@ -126,9 +126,9 @@ async def create_rsa_batch(
 
         # Reduced batch size to avoid overwhelming Google's ad policy crawler
         # Google Ads API limit: 10,000 operations per request
-        # But using smaller batches (100) to prevent DESTINATION_NOT_WORKING errors
-        # caused by CloudFront rate limiting Google's crawler
-        BATCH_LIMIT = 100
+        # But using smaller batches (20) to prevent "Too long" errors with large RSAs
+        # and DESTINATION_NOT_WORKING errors caused by CloudFront rate limiting Google's crawler
+        BATCH_LIMIT = 20
 
         # Process in chunks
         for chunk_start in range(0, len(ad_data_list), BATCH_LIMIT):

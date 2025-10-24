@@ -3,7 +3,7 @@
 
 -- Add theme_name column to jobs table
 ALTER TABLE thema_ads_jobs
-ADD COLUMN IF NOT EXISTS theme_name VARCHAR(50) DEFAULT 'singles_day';
+ADD COLUMN IF NOT EXISTS theme_name VARCHAR(50);
 
 -- Add batch_size column to jobs table (if not exists)
 ALTER TABLE thema_ads_jobs

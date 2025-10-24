@@ -811,6 +811,139 @@ class ThemaAdsService:
 
         return label_cache
 
+    def _validate_missing_ad_groups(
+        self,
+        client,
+        missing_by_theme: Dict[str, List[Dict]],
+        selected_themes: List[str],
+        batch_size: int = 5000
+    ) -> Dict[str, List[Dict]]:
+        """
+        Validate missing ad groups using prefetch-style label checking.
+        This ensures consistency with how job processing checks labels.
+
+        Returns: Filtered dict with only ad groups that truly lack DONE labels
+        """
+        from themes import get_theme_label
+
+        ga_service = client.get_service("GoogleAdsService")
+
+        # Group ad groups by customer for efficient batching
+        customer_ag_map = {}  # customer_id -> {theme -> [ag_data]}
+        for theme, ag_list in missing_by_theme.items():
+            for ag_data in ag_list:
+                customer_id = ag_data['customer_id']
+                if customer_id not in customer_ag_map:
+                    customer_ag_map[customer_id] = {}
+                if theme not in customer_ag_map[customer_id]:
+                    customer_ag_map[customer_id][theme] = []
+                customer_ag_map[customer_id][theme].append(ag_data)
+
+        validated_missing = {theme: [] for theme in selected_themes}
+
+        # Process each customer
+        for customer_id, themes_ag_map in customer_ag_map.items():
+            try:
+                # Get label resources for all DONE labels (prefetch-style)
+                label_resources_map = {}  # label_name -> resource_name
+                for theme in selected_themes:
+                    theme_label = get_theme_label(theme)
+                    done_label_name = f"{theme_label}_DONE"
+
+                    label_query = f"""
+                        SELECT label.resource_name, label.name
+                        FROM label
+                        WHERE label.name = '{done_label_name}'
+                    """
+                    try:
+                        label_search = ga_service.search(customer_id=customer_id, query=label_query)
+                        for row in label_search:
+                            label_resources_map[done_label_name] = row.label.resource_name
+                            break
+                    except Exception:
+                        pass
+
+                if not label_resources_map:
+                    # No DONE labels exist for this customer - all are valid (but only for selected themes)
+                    logger.info(f"Validation: No DONE label resources found for customer {customer_id}")
+                    for theme, ag_list in themes_ag_map.items():
+                        if theme in selected_themes:  # Only add themes that were requested
+                            validated_missing[theme].extend(ag_list)
+                            logger.info(f"  Accepting {len(ag_list)} ad groups for theme '{theme}' (no labels exist)")
+                        else:
+                            logger.info(f"  Skipping {len(ag_list)} ad groups for theme '{theme}' (not in selected themes)")
+                    continue
+
+                # Debug: log found label resources
+                logger.debug(f"Validation: Customer {customer_id} label resources: {label_resources_map}")
+
+                # Reverse map: resource -> name
+                resource_to_name = {v: k for k, v in label_resources_map.items()}
+
+                # Collect all ad group resources for this customer
+                all_ag_resources = []
+                ag_resource_to_data = {}  # ad_group_resource -> (theme, ag_data)
+                for theme, ag_list in themes_ag_map.items():
+                    for ag_data in ag_list:
+                        ag_resource = f"customers/{customer_id}/adGroups/{ag_data['ad_group_id']}"
+                        all_ag_resources.append(ag_resource)
+                        ag_resource_to_data[ag_resource] = (theme, ag_data)
+
+                # Query ad_group_label in batches (prefetch-style)
+                ag_done_labels = {}  # ag_resource -> set of DONE label names
+                for i in range(0, len(all_ag_resources), batch_size):
+                    batch = all_ag_resources[i:i + batch_size]
+                    resources_str = ", ".join(f"'{r}'" for r in batch)
+
+                    query = f"""
+                        SELECT
+                            ad_group_label.ad_group,
+                            ad_group_label.label
+                        FROM ad_group_label
+                        WHERE ad_group_label.ad_group IN ({resources_str})
+                    """
+
+                    try:
+                        response = ga_service.search(customer_id=customer_id, query=query)
+                        for row in response:
+                            label_resource = row.ad_group_label.label
+                            ag_resource = row.ad_group_label.ad_group
+
+                            # Check if this is one of the DONE labels we care about
+                            if label_resource in resource_to_name:
+                                label_name = resource_to_name[label_resource]
+                                if ag_resource not in ag_done_labels:
+                                    ag_done_labels[ag_resource] = set()
+                                ag_done_labels[ag_resource].add(label_name)
+                    except Exception as e:
+                        logger.warning(f"Validation query failed for customer {customer_id}: {e}")
+
+                # Filter: only keep ad groups that DON'T have their theme's DONE label (and only for selected themes)
+                for ag_resource, (theme, ag_data) in ag_resource_to_data.items():
+                    # Skip themes that weren't requested
+                    if theme not in selected_themes:
+                        continue
+
+                    theme_label = get_theme_label(theme)
+                    done_label_name = f"{theme_label}_DONE"
+
+                    ag_labels = ag_done_labels.get(ag_resource, set())
+                    if done_label_name not in ag_labels:
+                        # Confirmed missing - add to validated list
+                        validated_missing[theme].append(ag_data)
+                    else:
+                        # Has DONE label - skip it
+                        logger.debug(f"Filtered out ad group {ag_data['ad_group_id']} - already has {done_label_name}")
+
+            except Exception as e:
+                logger.error(f"Validation failed for customer {customer_id}: {e}", exc_info=True)
+                # On error, include ad groups from this customer (fail-safe, but only for selected themes)
+                for theme, ag_list in themes_ag_map.items():
+                    if theme in selected_themes:
+                        validated_missing[theme].extend(ag_list)
+
+        return validated_missing
+
     async def discover_all_missing_themes(
         self,
         client,
@@ -825,6 +958,8 @@ class ThemaAdsService:
         Discover all ad groups and identify which themes are missing.
         Creates jobs to add missing theme ads to each ad group.
 
+        Uses batch queries to minimize API calls and improve performance.
+
         Args:
             client: Google Ads API client
             customer_filter: Customer name prefix filter (default: "Beslist.nl -")
@@ -837,6 +972,8 @@ class ThemaAdsService:
         Returns:
             Dict with discovery results and created job IDs per theme
         """
+        import time
+        start_time = time.time()
         logger.info(f"Starting all-themes discovery: filter='{customer_filter}', themes={selected_themes}, limit={limit}")
 
         # Import theme utilities
@@ -908,7 +1045,7 @@ class ThemaAdsService:
                 'message': f"Failed to query customers: {str(e)}"
             }
 
-        # Step 2: Process each customer
+        # Step 2: Process each customer sequentially
         for customer_id in customer_ids:
             if limit and stats['ad_groups_analyzed'] >= limit:
                 logger.info(f"Reached limit of {limit} ad groups analyzed")
@@ -1128,9 +1265,30 @@ class ThemaAdsService:
                 logger.error(f"Customer {customer_id}: Error processing: {e}", exc_info=True)
                 continue
 
-        # Step 4: Create jobs per theme
+        # Step 2.5: Validate missing ad groups using prefetch-style logic
+        # This ensures we use the same label-checking approach that job processing will use
+        logger.info("Validating missing ad groups before creating jobs...")
+        validated_missing_by_theme = self._validate_missing_ad_groups(
+            client, missing_by_theme, selected_themes, batch_size
+        )
+
+        # Update stats with validation results
+        for theme in selected_themes:
+            original_count = len(missing_by_theme.get(theme, []))
+            validated_count = len(validated_missing_by_theme.get(theme, []))
+            if original_count != validated_count:
+                removed = original_count - validated_count
+                logger.info(f"  Theme '{theme}': Filtered out {removed} ad groups that already have DONE labels")
+                stats['missing_by_theme'][theme] = validated_count
+
+        # Step 3: Create jobs per theme (only for requested themes)
         job_ids_by_theme = {}
-        for theme, ad_groups_list in missing_by_theme.items():
+        for theme, ad_groups_list in validated_missing_by_theme.items():
+            # Skip themes that weren't requested
+            if theme not in selected_themes:
+                logger.info(f"Skipping theme '{theme}' - not in selected themes")
+                continue
+
             if not ad_groups_list:
                 logger.info(f"No missing ad groups for theme '{theme}'")
                 continue
@@ -1146,6 +1304,10 @@ class ThemaAdsService:
                 end_idx = min(start_idx + job_chunk_size, len(ad_groups_list))
                 chunk_data = ad_groups_list[start_idx:end_idx]
 
+                # Add theme_name to each item in chunk_data so create_job can use it
+                for item in chunk_data:
+                    item['theme_name'] = theme
+
                 # Create job
                 job_id = self.create_job(chunk_data, batch_size=batch_size, is_repair_job=False)
                 job_ids_by_theme[theme].append(job_id)
@@ -1157,7 +1319,11 @@ class ThemaAdsService:
 
             stats['jobs_created_by_theme'][theme] = len(job_ids_by_theme[theme])
 
+        # Performance metrics
+        total_elapsed = time.time() - start_time
+
         logger.info(f"All-themes discovery completed: {stats}")
+        logger.info(f"Execution time: {total_elapsed:.1f}s")
 
         return {
             'status': 'completed',

@@ -180,10 +180,11 @@ async def prefetch_ad_group_labels(
 
                 for row in response:
                     label_resource = row.ad_group_label.label
+                    ag_resource = row.ad_group_label.ad_group
                     # Check if this is one of the DONE labels we care about
                     if label_resource in resource_to_name:
                         label_name = resource_to_name[label_resource]
-                        ag_labels_map[row.ad_group_label.ad_group].add(label_name)
+                        ag_labels_map[ag_resource].add(label_name)
 
             total_with_labels = sum(1 for labels in ag_labels_map.values() if labels)
             logger.info(f"Found {total_with_labels} ad groups with DONE labels (checked in {len(ad_group_resources)//batch_size + 1} batches)")

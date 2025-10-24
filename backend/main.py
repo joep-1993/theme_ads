@@ -1,7 +1,8 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from typing import List, Optional
 import csv
 import io
 from datetime import datetime
@@ -716,7 +717,9 @@ async def upload_csv(
 async def upload_excel(
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = None,
-    batch_size: int = Form(7500)
+    batch_size: int = Form(7500),
+    is_activation_plan: bool = Form(False),
+    reset_activation_labels: bool = Form(False)
 ):
     """
     Upload Excel file with customer_id, ad_group_id, and theme columns.
@@ -725,6 +728,8 @@ async def upload_excel(
     Args:
         file: Excel file (.xlsx) to upload
         batch_size: Batch size for API queries (default: 7500)
+        is_activation_plan: If True, stores as activation plan instead of creating jobs
+        reset_activation_labels: If True (with is_activation_plan), resets ACTIVATION_DONE labels
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -856,6 +861,39 @@ async def upload_excel(
 
         workbook.close()
         logger.info(f"Parsed {len(input_data)} specific ad groups and {len(customers_to_discover)} customers for auto-discovery")
+
+        # Check if this is an activation plan upload
+        if is_activation_plan:
+            # Store as activation plan (customer_id -> theme mapping)
+            from backend.database import store_activation_plan
+
+            if customers_to_discover:
+                # This is a pure activation plan (customer + theme only)
+                plan_data = customers_to_discover
+            elif input_data:
+                # Convert input_data to plan format (use customer+theme, ignore ad_group_id)
+                plan_data = {}
+                for item in input_data:
+                    customer_id = item['customer_id']
+                    theme = item.get('theme_name', 'singles_day')
+                    plan_data[customer_id] = theme
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No valid data found for activation plan"
+                )
+
+            num_customers = store_activation_plan(plan_data, reset_labels=reset_activation_labels)
+
+            logger.info(f"Stored activation plan for {num_customers} customers")
+
+            return {
+                "status": "success",
+                "message": "Activation plan uploaded successfully",
+                "customers_in_plan": num_customers,
+                "plan_data": plan_data,
+                "reset_labels": reset_activation_labels
+            }
 
         # Auto-discover ad groups for customers without ad_group_id
         if customers_to_discover:
@@ -1537,6 +1575,192 @@ async def checkup_ad_groups(
         raise
     except Exception as e:
         logger.error(f"Checkup failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/thema-ads/run-all-themes")
+async def run_all_themes(
+    background_tasks: BackgroundTasks = None,
+    customer_filter: str = "Beslist.nl -",
+    themes: List[str] = Query(None),
+    limit: int = None,
+    batch_size: int = 5000,
+    job_chunk_size: int = 50000
+):
+    """
+    Run All Themes: Discover all ad groups and add missing theme ads.
+
+    Uses batch queries for improved performance.
+
+    This function:
+    - Finds all customers matching the filter
+    - Discovers all ad groups in HS/ campaigns with batch queries
+    - Checks which themes are missing (no DONE label AND no theme-labeled ads)
+    - Creates jobs per theme to add missing theme ads
+
+    Args:
+        customer_filter: Customer name prefix (default: "Beslist.nl -")
+        themes: List of theme names to process (None = all themes)
+        limit: Optional limit on number of ad groups to check
+        batch_size: Batch size for API queries (default: 5000)
+        job_chunk_size: Maximum items per job (default: 50000)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"Run All Themes: filter='{customer_filter}', themes={themes}, limit={limit}")
+
+    try:
+        from pathlib import Path
+        from dotenv import load_dotenv
+
+        # Load environment variables
+        env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+        else:
+            raise HTTPException(status_code=500, detail="Google Ads credentials not configured")
+
+        from config import load_config_from_env
+        from google_ads_client import initialize_client
+
+        config = load_config_from_env()
+        client = initialize_client(config.google_ads)
+
+        # Run all-themes discovery
+        result = await thema_ads_service.discover_all_missing_themes(
+            client=client,
+            customer_filter=customer_filter,
+            selected_themes=themes,
+            limit=limit,
+            batch_size=batch_size,
+            job_chunk_size=job_chunk_size,
+            background_tasks=background_tasks
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Run All Themes failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/thema-ads/activate-ads")
+async def activate_ads(
+    customer_ids: List[str] = None,
+    reset_labels: bool = False,
+    batch_size: int = 5000
+):
+    """
+    Activate the correct theme ad per customer based on activation plan.
+    Pauses all ads first, then activates the correct theme ad.
+
+    Args:
+        customer_ids: Optional list of customer IDs to process (None = all in plan)
+        reset_labels: If True, reprocess ad groups with ACTIVATION_DONE label
+        batch_size: Batch size for API queries (default: 5000)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"Activate ads parameters: customer_ids={customer_ids}, reset_labels={reset_labels}")
+
+    try:
+        from pathlib import Path
+        from dotenv import load_dotenv
+
+        # Load environment variables
+        env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+        else:
+            raise HTTPException(status_code=500, detail="Google Ads credentials not configured")
+
+        from config import load_config_from_env
+        from google_ads_client import initialize_client
+
+        config = load_config_from_env()
+        client = initialize_client(config.google_ads)
+
+        # Run activation
+        result = await thema_ads_service.activate_ads_per_plan(
+            client=client,
+            customer_ids=customer_ids,
+            batch_size=batch_size,
+            reset_labels=reset_labels
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ad activation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/thema-ads/activation-plan")
+async def get_activation_plan_api(customer_ids: List[str] = None):
+    """Get the current activation plan."""
+    try:
+        from backend.database import get_activation_plan
+        plan = get_activation_plan(customer_ids)
+        return {"plan": plan, "customer_count": len(plan)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/thema-ads/activation-missing-ads")
+async def get_activation_missing_ads_api():
+    """Get list of ad groups missing required theme ads."""
+    try:
+        from backend.database import get_activation_missing_ads
+        missing_ads = get_activation_missing_ads()
+        return {"missing_ads": missing_ads, "count": len(missing_ads)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/thema-ads/activation-missing-ads/export")
+async def export_activation_missing_ads():
+    """Export missing ads as CSV file."""
+    try:
+        from backend.database import get_activation_missing_ads
+        import io
+        import csv
+
+        missing_ads = get_activation_missing_ads()
+
+        # Create CSV in memory
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Write header
+        writer.writerow(['customer_id', 'campaign_id', 'campaign_name', 'ad_group_id', 'ad_group_name', 'required_theme', 'detected_at'])
+
+        # Write data
+        for row in missing_ads:
+            writer.writerow([
+                row['customer_id'],
+                row['campaign_id'],
+                row['campaign_name'],
+                row['ad_group_id'],
+                row['ad_group_name'],
+                row['required_theme'],
+                row['detected_at']
+            ])
+
+        # Prepare response
+        output.seek(0)
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=activation_missing_ads.csv"}
+        )
+
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
