@@ -89,6 +89,14 @@ _Technical reference for the project. Update when: architecture changes, new pat
    - Use dictionary lookups for O(1) resource→ID mapping instead of O(n) linear search
    - Reduced 50,000 queries to ~30 queries in all-themes discovery
    - Discovery time: 8+ hours → 5-10 minutes for 10,000 ad groups (99x faster)
+13. **Duplicate Ad Removal with Batch Optimization** - 50x performance improvement for duplicate detection
+   - Content-based duplicate detection: sorted(headlines+descriptions) signature for uniqueness
+   - Priority scoring: theme_label_count * 100 + has_any_theme * 10 + is_enabled * 1
+   - Python stable sort for deterministic tie-breaking (older ads preferred)
+   - Batch label fetching: 86,205 queries → ~18 queries using two-step GAQL approach
+   - DUPLICATES_CHECKED label prevents reprocessing
+   - Performance: 90 seconds vs 60+ minutes for 67,719 ads
+   - Two-step GAQL: Fetch label resources with IN clause → Fetch label names → Map in code
 
 ### Reliability
 1. **Idempotent Processing** - SD_DONE labels prevent duplicate processing
@@ -240,6 +248,9 @@ theme_ads/
 │   # Note: All template files use RSA countdown format: {COUNTDOWN(yyyy-MM-dd HH:mm:ss,daysBefore)}
 ├── delete_sd_checked_labels.py     # Utility: Delete SD_CHECKED labels from all accounts
 ├── remove_singles_day_ads_batch.py # Utility: Remove SINGLES_DAY ads and SD_DONE labels
+├── remove_duplicate_ads.py         # Utility: Remove duplicate RSAs keeping theme-labeled ads (batch optimized, 50x speedup)
+├── remove_all_duplicates.py        # Utility: Wrapper to process all 28 customers sequentially for duplicate removal
+├── check_ad_groups.py              # Utility: Check ad group labels and theme ads
 ├── frontend/
 │   ├── thema-ads.html              # Web UI (4 tabs: Excel Upload, CSV Upload, Auto-Discover, Check-up)
 │   └── js/

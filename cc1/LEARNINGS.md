@@ -79,6 +79,62 @@ docker exec theme_ads-db-1 psql -U postgres -d thema_ads -c \
   - backend/migrations/add_theme_support.sql (removed DEFAULT)
 - **Result**: Discovery now creates jobs ONLY for explicitly selected themes
 
+### Google Ads API Resource Name Format for Ad Group Ads (2025-10-24)
+- **Problem**: Malformed resource name error when working with ad_group_ad resources
+- **Error**: `Resource name 'customers/{customer_id}/adGroups/{ad_group_id}/ads/{ad_id}' is malformed: expected 'customers/{customer_id}/adGroupAds/{ad_group_id}~{ad_id}'`
+- **Root Cause**: Incorrect resource name format - used `/adGroups/` and `/ads/` with forward slash separator
+- **Solution**: Use correct format with tilde (`~`) separator:
+  - ❌ Wrong: `customers/{customer_id}/adGroups/{ad_group_id}/ads/{ad_id}`
+  - ✅ Correct: `customers/{customer_id}/adGroupAds/{ad_group_id}~{ad_id}`
+- **Key Insight**: AdGroupAd resources use a different naming convention than other Google Ads resources
+- **Files**: remove_duplicate_ads.py lines 68-69, 107
+- **Use Case**: Removing duplicate ads, labeling ads, querying ad labels
+
+### Google Ads Query Language INNER JOIN Not Supported (2025-10-24)
+- **Problem**: GAQL query fails with syntax error when trying to join tables
+- **Error**: `Error in query: unexpected input INNER` when trying `INNER JOIN label ON ad_group_ad_label.label = label.resource_name`
+- **Root Cause**: Google Ads Query Language has limited syntax - does not support explicit JOIN clauses
+- **Solution**: Use two-step approach with implicit joins via resource names:
+  1. **Step 1**: Fetch label resources using IN clause
+     ```sql
+     SELECT ad_group_ad_label.ad_group_ad, ad_group_ad_label.label
+     FROM ad_group_ad_label
+     WHERE ad_group_ad_label.ad_group_ad IN (list_of_ad_resources)
+     ```
+  2. **Step 2**: Fetch label names using label resources
+     ```sql
+     SELECT label.resource_name, label.name
+     FROM label
+     WHERE label.resource_name IN (list_of_label_resources)
+     ```
+  3. **Step 3**: Map resources to names in application code
+- **Performance**: Still achieves 50x speedup with batching despite two-step approach
+- **Files**: remove_duplicate_ads.py batch_fetch_ad_labels() lines 74-121
+- **Key Insight**: GAQL is not SQL - treat it as a limited query language designed for simple filtering
+
+### Database Connection Requires DATABASE_URL (2025-10-24)
+- **Problem**: PostgreSQL connection fails with "no password supplied" error
+- **Error**: `psycopg2.OperationalError: connection to server at "db" (172.20.0.2), port 5432 failed: fe_sendauth: no password supplied`
+- **Root Cause**: Using individual connection parameters (dbname, user, password, host, port) with empty password from environment
+- **Solution**: Use DATABASE_URL environment variable directly:
+  ```python
+  # ❌ Wrong: Individual params with missing password
+  conn = psycopg2.connect(
+      dbname=os.getenv('DB_NAME', 'thema_ads'),
+      user=os.getenv('DB_USER', 'postgres'),
+      password=os.getenv('DB_PASSWORD', ''),  # Empty!
+      host=os.getenv('DB_HOST', 'db'),
+      port=os.getenv('DB_PORT', '5432')
+  )
+
+  # ✅ Correct: Use DATABASE_URL
+  conn = psycopg2.connect(
+      os.getenv("DATABASE_URL", "postgresql://postgres:postgres@db:5432/thema_ads")
+  )
+  ```
+- **Files**: remove_all_duplicates.py lines 37-38
+- **Key Insight**: DATABASE_URL includes all connection info including password in single string
+
 ### Container Auto-Reload Killing Long-Running Jobs (2025-10-20)
 - **Problem**: Uvicorn's `--reload` flag watches for file changes and restarts the container, killing long-running background jobs mid-process
 - **Impact**: Job 213 stopped at 43.2% (21,595/50,000 items) when we edited code, remained in "running" state but was actually dead
@@ -1869,6 +1925,93 @@ New: "{KeyWord:Aanbieding} Nog {COUNTDOWN(...)}" (29 chars)
 - **Validation Formula**: `base_text + (countdown_count × 8) + (keyword_count × 15) ≤ 30`
 - **Prevention**: Always calculate max rendered length before adding headlines to themes
 - **Impact**: All themes now validated and ready for production use
+
+## Patterns
+
+### Batch Query Optimization for Google Ads API (2025-10-24)
+- **Pattern**: Eliminate N+1 query anti-pattern by batching with IN clauses
+- **Use Case**: Scanning 67,719 ads with their labels for duplicate detection
+- **Implementation**:
+  ```python
+  # Step 1: Build IN clause with batch of resources
+  BATCH_SIZE = 5000
+  ad_resources = [f"'customers/{cid}/adGroupAds/{ag_id}~{ad_id}'" for ag_id, ad_id in batch]
+  in_clause = ", ".join(ad_resources)
+
+  # Step 2: Fetch label resources (first query)
+  query1 = f"""
+      SELECT ad_group_ad_label.ad_group_ad, ad_group_ad_label.label
+      FROM ad_group_ad_label
+      WHERE ad_group_ad_label.ad_group_ad IN ({in_clause})
+  """
+
+  # Step 3: Collect unique label resources
+  all_label_resources = set()
+  ad_to_labels = {}
+  for row in response:
+      ad_to_labels[row.ad_group_ad_label.ad_group_ad].append(row.ad_group_ad_label.label)
+      all_label_resources.add(row.ad_group_ad_label.label)
+
+  # Step 4: Batch fetch label names (second query)
+  label_in_clause = ", ".join(f"'{lr}'" for lr in all_label_resources)
+  query2 = f"""
+      SELECT label.resource_name, label.name
+      FROM label
+      WHERE label.resource_name IN ({label_in_clause})
+  """
+
+  # Step 5: Map resources to names
+  label_resource_to_name = {row.label.resource_name: row.label.name for row in response}
+  ```
+- **Performance**:
+  - Before: 86,205 individual queries (60+ minutes)
+  - After: ~18 batch queries in two steps (31 seconds)
+  - Improvement: 50x speedup (116x faster query reduction)
+- **Key Insights**:
+  - GAQL doesn't support INNER JOIN - use two-step approach with implicit joins
+  - Batch size of 5,000 resources per query is optimal
+  - Dictionary lookups for O(1) mapping vs O(n) linear search
+  - Memory overhead minimal (few MB for dictionaries)
+- **Files**: remove_duplicate_ads.py batch_fetch_ad_labels() function (lines 48-127)
+
+### Priority-Based Duplicate Resolution with Stable Sort (2025-10-24)
+- **Pattern**: When multiple duplicate ads exist, score by priority and use Python's stable sort for tie-breaking
+- **Use Case**: Remove duplicate RSAs while preserving ads with proper theme labels
+- **Implementation**:
+  ```python
+  # Define theme labels to prioritize
+  theme_labels = {'THEME_BF', 'THEME_CM', 'THEME_SK', 'THEME_KM', 'THEME_SD'}
+
+  # Score each duplicate ad
+  scored_ads = []
+  for ad in duplicate_group:
+      theme_label_count = len([l for l in ad['labels'] if l in theme_labels])
+      has_any_theme = any(l in theme_labels for l in ad['labels'])
+      is_enabled = ad['status'] == 'ENABLED'
+
+      # Priority scoring: theme labels > any theme > enabled status
+      score = (theme_label_count * 100) + (has_any_theme * 10) + (is_enabled * 1)
+      scored_ads.append((score, ad))
+
+  # Sort by score descending (highest = keep)
+  # Python's sort is stable - maintains original order for equal scores
+  scored_ads.sort(reverse=True, key=lambda x: x[0])
+
+  # Keep first (highest scored), remove rest
+  to_keep = scored_ads[0][1]
+  to_remove = [ad for score, ad in scored_ads[1:]]
+  ```
+- **Scoring System**:
+  - Multiple theme labels: 100+ points per label (keep ads labeled with specific themes)
+  - Any theme label: 10 points (prefer themed ads over unlabeled)
+  - Enabled status: 1 point (prefer active ads as final tie-breaker)
+  - Equal scores: Python's stable sort keeps first ad encountered (typically oldest by API order)
+- **Benefits**:
+  - Deterministic: Same inputs always produce same result
+  - Transparent: Score value explains why ad was kept
+  - Flexible: Easy to adjust priorities by changing score weights
+  - Safe: Tie-breaking via stable sort prevents random selection
+- **Files**: remove_duplicate_ads.py remove_duplicate_ads() function (lines 390-401)
 
 ---
 _Last updated: 2025-10-23_
