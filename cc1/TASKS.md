@@ -7,6 +7,8 @@ _Active tasks for immediate work_
 ## In Progress
 _Tasks currently being worked on_
 
+- [ ] Complete duplicate removal labeling phase for customer 4056770576 (ran duplicate removal script for 77 minutes; scanning and duplicate removal phases completed successfully; found 3,357 ad groups with duplicates; removed all duplicate ads; labeling phase stopped at 26% completion with 884/3,357 ad groups labeled; remaining 2,473 ad groups need DUPLICATES_CHECKED label to prevent reprocessing; log file: /tmp/fully_optimized_duplicate_removal_v2.log) #claude-session:2025-10-24
+
 ## Completed
 _Finished tasks (move here when done)_
 
