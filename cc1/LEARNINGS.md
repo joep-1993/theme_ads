@@ -34,6 +34,51 @@ docker exec theme_ads-db-1 psql -U postgres -d thema_ads -c \
 
 ## Common Issues & Solutions
 
+### Singles Day Jobs Created Despite Theme Not Selected (2025-10-24)
+- **Problem**: Discovery always created singles_day jobs regardless of which themes were selected in UI
+- **Symptoms**: Jobs 385, 387, 388, 389, 390, 391, 392 all singles_day even when only black_friday, cyber_monday, sinterklaas, kerstmis were checked
+- **Root Cause #1 (CRITICAL)**: FastAPI Query parameter parsing
+  - Without `Query()`, FastAPI doesn't properly parse repeated query parameters (e.g., `themes=x&themes=y&themes=z`)
+  - Parameter `themes: List[str] = None` always received `None` value even when themes were provided
+  - Discovery function then defaulted to ALL themes: `if selected_themes is None: selected_themes = list(SUPPORTED_THEMES.keys())`
+- **Root Cause #2**: Missing theme_name field in job creation data
+  - Discovery's job creation loop didn't set `theme_name` field on chunk_data items
+  - `create_job()` method extracts theme: `theme_name = input_data[0].get('theme_name', 'singles_day')`
+  - Missing field caused fallback to 'singles_day' default
+- **Root Cause #3**: Database default value
+  - Table column had: `thema_ads_jobs.theme_name VARCHAR(50) DEFAULT 'singles_day'`
+  - Even when theme_name was NULL in INSERT, database applied singles_day default
+- **Solution**: Three-part fix (all required)
+  1. **FastAPI Query import** (backend/main.py line 1, 1585):
+     ```python
+     from fastapi import FastAPI, ..., Query
+
+     @app.post("/api/thema-ads/run-all-themes")
+     async def run_all_themes(
+         themes: List[str] = Query(None),  # ← Fixed: Now properly parses repeated params
+     ```
+  2. **Add theme_name to chunk_data** (backend/thema_ads_service.py lines 1307-1309):
+     ```python
+     for chunk_idx in range(num_chunks):
+         chunk_data = ad_groups_list[start_idx:end_idx]
+         # Add theme_name to each item
+         for item in chunk_data:
+             item['theme_name'] = theme
+         job_id = self.create_job(chunk_data, ...)
+     ```
+  3. **Remove database default** (Database + migration file):
+     ```sql
+     ALTER TABLE thema_ads_jobs ALTER COLUMN theme_name DROP DEFAULT;
+     -- Updated backend/migrations/add_theme_support.sql line 6
+     ```
+- **Key Insight**: FastAPI needs explicit `Query()` to handle repeated query parameters; simple `List[str] = None` doesn't work
+- **Testing**: Job 392 was created AFTER fixes (8 minutes later) proving Query() issue was the primary bug
+- **Files Modified**:
+  - backend/main.py (FastAPI Query import and parameter)
+  - backend/thema_ads_service.py (theme_name assignment in job creation)
+  - backend/migrations/add_theme_support.sql (removed DEFAULT)
+- **Result**: Discovery now creates jobs ONLY for explicitly selected themes
+
 ### Container Auto-Reload Killing Long-Running Jobs (2025-10-20)
 - **Problem**: Uvicorn's `--reload` flag watches for file changes and restarts the container, killing long-running background jobs mid-process
 - **Impact**: Job 213 stopped at 43.2% (21,595/50,000 items) when we edited code, remained in "running" state but was actually dead
@@ -723,6 +768,32 @@ git config user.email "email@example.com"
 ```
 
 ## Project Patterns
+
+### FastAPI Query Parameters for Repeated Values (2025-10-24)
+- **Pattern**: Use `Query()` for list parameters that accept repeated values
+- **Problem**: Simple `List[str] = None` doesn't parse repeated query params correctly
+- **Symptom**: API receives `?themes=x&themes=y&themes=z` but parameter is always `None`
+- **Root Cause**: FastAPI needs explicit `Query()` to handle repeated parameters
+- **Solution**:
+```python
+from fastapi import Query
+
+# ❌ WRONG: Doesn't parse repeated params
+@app.post("/api/endpoint")
+async def endpoint(themes: List[str] = None):
+    # themes is always None, even with ?themes=x&themes=y
+
+# ✅ CORRECT: Properly parses repeated params
+@app.post("/api/endpoint")
+async def endpoint(themes: List[str] = Query(None)):
+    # themes = ['x', 'y'] when called with ?themes=x&themes=y
+```
+- **Use Case**: Theme selection in discovery endpoint
+  - Frontend: `?themes=black_friday&themes=cyber_monday&themes=sinterklaas&themes=kerstmis`
+  - Without Query(): `themes = None` → defaults to ALL themes including singles_day
+  - With Query(): `themes = ['black_friday', 'cyber_monday', 'sinterklaas', 'kerstmis']` → correct filtering
+- **Benefit**: Proper parameter parsing prevents unintended behavior when None is used as "all values" default
+- **When to Use**: Any FastAPI endpoint that accepts repeated query parameters (lists of values)
 
 ### Theme Template File Management
 - **Pattern**: Centralized theme content in structured text file directories for easy bulk updates

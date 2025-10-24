@@ -17,10 +17,13 @@ _Technical reference for the project. Update when: architecture changes, new pat
   - `/api/thema-ads/discover` - Auto-discover ad groups from MCC (with theme parameter)
   - `/api/thema-ads/themes` - Get list of supported themes
   - `/api/thema-ads/checkup` - Audit processed ad groups, verify theme ads exist (multi-theme aware)
+  - `/api/thema-ads/run-all-themes` - Discovery with theme selection (uses Query(None) for proper repeated param parsing)
   - `/api/thema-ads/queue/status` - Get auto-queue enabled state
   - `/api/thema-ads/queue/enable` - Enable automatic job queue
   - `/api/thema-ads/queue/disable` - Disable automatic job queue
 - `backend/thema_ads_service.py` - Business logic and job processing
+  - `discover_all_missing_themes()` - Discovery with batch queries and theme filtering (lines 947-1340)
+  - Discovery job creation (lines 1302-1318): Assigns theme_name to each ad group item before creating jobs to ensure proper theme tracking; without this field, create_job() falls back to 'singles_day' default
   - `checkup_ad_groups()` - Database-driven multi-theme checkup: queries job_items for theme_name, checks theme-specific labels (THEME_BF, THEME_CM, etc.), creates repair jobs with correct theme
   - `get_next_pending_job()` - Returns oldest pending job ID (FIFO)
   - `_start_next_job_if_queue_enabled()` - Auto-queue logic: waits 30s, checks queue state, starts next job
@@ -121,7 +124,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
 ## Database Schema
 
 ### Multi-Theme Support
-- `thema_ads_jobs.theme_name` VARCHAR(50) - Default theme for job (optional, can be NULL for mixed-theme jobs)
+- `thema_ads_jobs.theme_name` VARCHAR(50) - Theme for job (NO DEFAULT VALUE - must be explicitly set during job creation; database default removed 2025-10-24 to prevent incorrect theme assignment via fallback; theme must be provided in create_job() call)
 - `thema_ads_job_items.theme_name` VARCHAR(50) - Theme for specific ad group
 - `thema_ads_input_data.theme_name` VARCHAR(50) - Theme from original upload
 - `system_settings` table - Store system-wide configuration (auto-queue state)
