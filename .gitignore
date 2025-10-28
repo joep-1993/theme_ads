@@ -37,3 +37,4 @@ thema_ads_project/thema_ads
 # Logs
 *.log
 logs/
+removal_progress*.txt

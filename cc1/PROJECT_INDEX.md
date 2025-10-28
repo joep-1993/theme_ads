@@ -97,6 +97,13 @@ _Technical reference for the project. Update when: architecture changes, new pat
    - DUPLICATES_CHECKED label prevents reprocessing
    - Performance: 90 seconds vs 60+ minutes for 67,719 ads
    - Two-step GAQL: Fetch label resources with IN clause → Fetch label names → Map in code
+14. **Parallel Duplicate Removal** - 60% time reduction using multi-processing
+   - ProcessPoolExecutor with 3 concurrent workers (one per customer)
+   - Each customer has separate Google Ads API rate limits (safe to parallelize)
+   - Automatic resume from DUPLICATES_CHECKED labels after interruptions
+   - Results: 58,771 duplicate ads removed across 28 customer accounts
+   - Processing time: ~12 hours parallel vs ~30+ hours sequential
+   - Rate limit safety: Each customer account has independent API quota
 
 ### Reliability
 1. **Idempotent Processing** - SD_DONE labels prevent duplicate processing
@@ -250,6 +257,7 @@ theme_ads/
 ├── remove_singles_day_ads_batch.py # Utility: Remove SINGLES_DAY ads and SD_DONE labels
 ├── remove_duplicate_ads.py         # Utility: Remove duplicate RSAs keeping theme-labeled ads (batch optimized, 50x speedup)
 ├── remove_all_duplicates.py        # Utility: Wrapper to process all 28 customers sequentially for duplicate removal
+├── remove_all_duplicates_parallel.py # Utility: Parallel version with 3 workers (60% faster, 58,771 ads removed)
 ├── check_ad_groups.py              # Utility: Check ad group labels and theme ads
 ├── frontend/
 │   ├── thema-ads.html              # Web UI (4 tabs: Excel Upload, CSV Upload, Auto-Discover, Check-up)
@@ -281,4 +289,4 @@ theme_ads/
 ```
 
 ---
-_Last updated: 2025-10-17_
+_Last updated: 2025-10-28_
