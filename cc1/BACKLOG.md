@@ -4,6 +4,7 @@ _Future features and improvements. Update when: ideas emerge, features are plann
 ## Ideas
 _Features under consideration_
 
+- Job execution coordination system (prevent concurrent execution of conflicting operations like discovery+activation; add job dependency tracking to ensure discovery completes before activation starts; could implement mutex locks per customer or operation type; would reduce race conditions, API rate limit issues, and container resource exhaustion) #impact:low #effort:medium #type:improvement
 - Adaptive rate limiting based on API response patterns (monitor 503 error frequency and automatically adjust batch size, delays, and concurrency) #impact:medium #effort:large #type:improvement
 - RSA slot management for 3-ad limit (automatically remove old theme ads when ad group is full; implementation started in rsa_management.py but not yet integrated) #impact:high #effort:medium #type:feature
 - Automated gap detection and repair (periodic audit to detect ad groups with THEME_*_DONE labels but missing theme ads; ALL_THEMES_DONE label now automatically applied by fill_missing_themed_ads_parallel_v3.py; Check-up function now optimized with 12-24x performance improvement and THEMES_CHECK_DONE tracking; could further enhance with automatic scheduling and email reports) #impact:medium #effort:small #type:improvement #status:enhanced

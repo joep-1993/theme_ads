@@ -11,7 +11,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - **Quality Assurance**: Check-up function audits processed ad groups, verifies ad integrity, creates repair jobs
 
 ### Key Components
-- `backend/main.py` - FastAPI API endpoints (CSV upload, Excel upload, auto-discovery, checkup, queue management)
+- `backend/main.py` - FastAPI API endpoints (CSV upload, Excel upload, auto-discovery, checkup, activation, queue management)
   - `/api/thema-ads/upload` - CSV upload and job creation (legacy, defaults to singles_day theme)
   - `/api/thema-ads/upload-excel` - Excel upload with theme column support
   - `/api/thema-ads/discover` - Auto-discover ad groups from MCC (with theme parameter)
@@ -19,6 +19,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
   - `/api/thema-ads/checkup` - OPTIMIZED audit of processed ad groups with skip_audited parameter (default: true)
   - `/api/thema-ads/remove-checkup-labels` - Remove THEMES_CHECK_DONE labels for clean audit runs
   - `/api/thema-ads/run-all-themes` - Discovery with theme selection (uses Query(None) for proper repeated param parsing)
+  - `/api/thema-ads/activate-optimized` - OPTIMIZED activation with parallel processing (lines 1768-1824); processes customers in parallel (default: 5 workers), bulk queries for theme and original ads, batch status updates; parameters: customer_ids (optional), parallel_workers (default: 5), reset_labels (default: false)
   - `/api/thema-ads/queue/status` - Get auto-queue enabled state
   - `/api/thema-ads/queue/enable` - Enable automatic job queue
   - `/api/thema-ads/queue/disable` - Disable automatic job queue
@@ -27,6 +28,8 @@ _Technical reference for the project. Update when: architecture changes, new pat
   - Discovery job creation (lines 1302-1318): Assigns theme_name to each ad group item before creating jobs to ensure proper theme tracking; without this field, create_job() falls back to 'singles_day' default
   - `checkup_ad_groups()` - OPTIMIZED: Direct Google Ads audit (12-24x faster); customer pre-filtering, bulk theme queries, HS/ campaign filter, chunking (500 AG/1000 ads), THEMES_CHECK_DONE tracking with skip_audited parameter (lines 601-921)
   - `remove_checkup_labels()` - Remove THEMES_CHECK_DONE labels from all ad groups (lines 512-599)
+  - `activate_ads_per_plan()` - Original activation function with per-ad-group processing (lines 1525-1906)
+  - `activate_ads_per_plan_optimized()` - OPTIMIZED: 5-10x faster activation (lines 1908-2180); parallel customer processing with configurable workers (default: 5), bulk queries for theme-labeled ads and THEMA_ORIGINAL ads, batch status updates (enable theme ads, pause original ads); eliminates per-ad-group operations; uses asyncio.gather for concurrent execution and async locks for thread-safe stats
   - `get_next_pending_job()` - Returns oldest pending job ID (FIFO)
   - `_start_next_job_if_queue_enabled()` - Auto-queue logic: waits 30s, checks queue state, starts next job
 - `backend/database.py` - Database connection management, auto-queue state persistence

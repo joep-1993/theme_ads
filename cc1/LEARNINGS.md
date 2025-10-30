@@ -298,6 +298,62 @@ for batch_start in range(0, len(ad_group_resources), BATCH_SIZE):
 - **Files Modified**: `backend/thema_ads_service.py` (lines 962-1126)
 - **Testing**: Ready for validation with limit=500-1000
 
+### Container Restart Kills Concurrent Jobs Simultaneously (2025-10-31)
+- **Problem**: Multiple jobs running concurrently all fail at exact same time when container restarts
+- **Example**: Jobs 399 (Black Friday) and 400 (Cyber Monday) both failed at 23:31:26
+  - Job 399: Running for 1h 36min, processed 18,762/36,084 ad groups (52%)
+  - Job 400: Running for 17min, processed 3,021/50,000 ad groups (6%)
+  - Both marked as failed with identical timestamp (23:31:26)
+- **Root Cause**: Container restart (due to code changes, resource limits, or manual restart) kills all background job processes
+- **Detection**: Startup event handler finds jobs marked "running" and auto-fails them:
+```
+Found stale running job 400, marking as failed
+Found stale running job 399, marking as failed
+```
+- **Impact**:
+  - Lost progress for all running jobs (not resumable from checkpoint)
+  - Jobs in "running" state before restart become "failed" after restart
+  - Data partially processed but job shows failed status
+- **Prevention**:
+  1. Avoid running multiple jobs concurrently (increases risk of resource exhaustion)
+  2. Use auto-queue to run jobs sequentially instead
+  3. Monitor container resource usage (memory, CPU) to prevent OOM kills
+  4. Avoid code changes/deployments while jobs are running
+- **Recovery**: Jobs must be restarted from beginning (item-level status preserved, but job-level resume not implemented)
+- **Files**: `backend/main.py` startup event handler marks stale jobs as failed
+- **Related**: See "Stale Job Cleanup on Container Startup (2025-10-22)" for cleanup mechanism
+
+### Sequential vs Concurrent Job Execution Best Practices (2025-10-31)
+- **Context**: Running discovery and activation jobs simultaneously
+- **Recommendation**: **Always run sequentially** (discovery first, then activation)
+- **Risks of Concurrent Execution**:
+  1. **API Rate Limiting** 💥
+     - Both operations make heavy API calls
+     - Running concurrently doubles API call rate
+     - Higher risk of 503 errors and rate limit failures
+  2. **Race Conditions** 🏁
+     - Discovery creates new theme ads while activation queries ads
+     - Activation might query before new ads are created → stale data
+     - Inconsistent state between operations
+  3. **Resource Contention** 🔥
+     - Both are CPU/memory intensive with parallel processing
+     - Container may run out of resources (as seen with jobs 399/400 failure)
+     - Increases risk of container restart killing all jobs
+  4. **Debugging Complexity** 🤔
+     - Hard to determine which operation caused changes
+     - Difficult to diagnose failures when multiple operations running
+- **Correct Workflow**:
+  1. ✅ Run discovery job to create missing theme ads
+  2. ⏱️ Wait for discovery to complete
+  3. ✅ Run activation to enable correct theme per customer
+  4. ✅ Verify results
+- **Exception**: If concurrent execution is required, reduce parallelism:
+  - Lower `parallel_workers` for activation (2-3 instead of 5)
+  - Reduce discovery `batch_size` to decrease API frequency
+  - Monitor container resources closely
+  - Expect higher failure rates due to rate limiting
+- **Applies To**: Discovery + Activation, Discovery + Checkup, Multiple Discovery jobs
+
 ### Auto-Queue Async Context Issue (2025-10-22)
 - **Problem**: Jobs started by auto-queue feature showing "0 progress" for extended periods (10-20 minutes)
 - **Symptoms**:
@@ -1976,6 +2032,73 @@ New: "{KeyWord:Aanbieding} Nog {COUNTDOWN(...)}" (29 chars)
   - Dictionary lookups for O(1) mapping vs O(n) linear search
   - Memory overhead minimal (few MB for dictionaries)
 - **Files**: remove_duplicate_ads.py batch_fetch_ad_labels() function (lines 48-127)
+
+### Parallel Customer Processing with Bulk Queries for Activation (2025-10-31)
+- **Pattern**: Process multiple customers concurrently with bulk ad queries by label
+- **Use Case**: Activate theme ads across 28 customers (enable theme ads, pause original ads)
+- **Problem**: Sequential per-ad-group processing is slow (N × M operations where N = customers, M = ad groups)
+- **Solution**: Parallel customers + bulk queries + batch status updates
+- **Implementation**:
+  ```python
+  async def activate_ads_per_plan_optimized(self, client, customer_ids, parallel_workers=5):
+      """Process customers in parallel with bulk operations."""
+
+      async def process_customer(customer_id: str, required_theme: str):
+          # Step 1: ONE query to get all ads with theme label
+          theme_ads_query = f"""
+              SELECT ad_group.id, ad_group_ad.resource_name, ad_group_ad.status
+              FROM ad_group_ad
+              WHERE campaign.name LIKE 'HS/%'
+              AND label.name = '{get_theme_label(required_theme)}'
+          """
+          theme_ads = ga_service.search(customer_id, theme_ads_query)
+
+          # Step 2: ONE query to get all ads with THEMA_ORIGINAL label
+          original_ads_query = f"""
+              SELECT ad_group.id, ad_group_ad.resource_name, ad_group_ad.status
+              FROM ad_group_ad
+              WHERE campaign.name LIKE 'HS/%'
+              AND label.name = 'THEMA_ORIGINAL'
+          """
+          original_ads = ga_service.search(customer_id, original_ads_query)
+
+          # Step 3: Batch enable all theme ads (chunks of 5000)
+          enable_operations = [create_enable_operation(ad) for ad in theme_ads if paused]
+          ad_group_ad_service.mutate_ad_group_ads(customer_id, enable_operations)
+
+          # Step 4: Batch pause all original ads (chunks of 5000)
+          pause_operations = [create_pause_operation(ad) for ad in original_ads if enabled]
+          ad_group_ad_service.mutate_ad_group_ads(customer_id, pause_operations)
+
+      # Process customers in parallel (5 workers)
+      tasks = [process_customer(cid, theme) for cid, theme in plan.items()]
+      for i in range(0, len(tasks), parallel_workers):
+          batch = tasks[i:i+parallel_workers]
+          await asyncio.gather(*batch, return_exceptions=True)
+  ```
+- **Performance**:
+  - **Old approach**: N customers × M ad groups × 3 queries/operations per ad group
+  - **New approach**: N customers × 3 queries + 2 batch operations (parallel)
+  - **Queries per customer**: ~50,000 (old) → 3 (new) = 99.99% reduction
+  - **Speed**: Sequential (old) → 5-10x faster with parallelism
+- **Key Optimizations**:
+  1. **Query by label**: `WHERE label.name = 'THEME_BF'` gets all theme ads in one query
+  2. **Parallel execution**: Process 5 customers simultaneously with asyncio.gather()
+  3. **Batch mutations**: Update 5000 ads per API call instead of 1
+  4. **Async locks**: Thread-safe stats tracking with asyncio.Lock()
+- **Benefits**:
+  - Eliminates per-ad-group loops and queries
+  - Reduces API call volume by 99%+
+  - Parallel processing uses multiple API quotas (per-customer limits)
+  - Handles large customers (10K+ ad groups) efficiently
+- **Trade-offs**:
+  - Higher memory usage (loads all ads into memory)
+  - Requires careful error handling (one customer failure shouldn't stop others)
+  - Need async lock for shared stats across parallel tasks
+- **Files**:
+  - `backend/thema_ads_service.py` activate_ads_per_plan_optimized() (lines 1908-2180)
+  - `backend/main.py` /api/thema-ads/activate-optimized endpoint (lines 1768-1824)
+- **Related**: See "Batch Query Optimization" for similar pattern in duplicate detection
 
 ### Priority-Based Duplicate Resolution with Stable Sort (2025-10-24)
 - **Pattern**: When multiple duplicate ads exist, score by priority and use Python's stable sort for tie-breaking
