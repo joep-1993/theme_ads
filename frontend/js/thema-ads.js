@@ -461,17 +461,19 @@ async function runCheckup() {
     const limit = document.getElementById('checkupLimit').value;
     const batchSize = document.getElementById('checkupBatchSize').value;
     const jobChunkSize = document.getElementById('checkupJobChunkSize').value;
+    const skipAudited = document.getElementById('checkupSkipAudited').checked;
     const resultDiv = document.getElementById('checkupResult');
     const btn = document.getElementById('checkupBtn');
 
     btn.disabled = true;
-    resultDiv.innerHTML = '<div class="alert alert-info">Running check-up...</div>';
+    resultDiv.innerHTML = '<div class="alert alert-info">Running optimized check-up...</div>';
 
     try {
         const params = new URLSearchParams();
         if (limit) params.append('limit', limit);
         params.append('batch_size', batchSize);
         params.append('job_chunk_size', jobChunkSize);
+        params.append('skip_audited', skipAudited);
 
         const response = await fetch(`/api/thema-ads/checkup?${params}`, {
             method: 'POST'
@@ -503,13 +505,14 @@ async function runCheckup() {
                             <span class="badge bg-success fs-6">${stats.ad_groups_verified}</span>
                         </div>
                         <div class="col-md-3">
-                            <strong>Missing Ads</strong><br>
-                            <span class="badge bg-warning fs-6">${stats.ad_groups_missing_singles_day}</span>
+                            <strong>Missing Theme Ads</strong><br>
+                            <span class="badge bg-warning fs-6">${stats.ad_groups_missing_theme_ad || stats.ad_groups_missing_singles_day || 0}</span>
                         </div>
                     </div>
                     <hr>
-                    <strong>SD_CHECKED labels applied:</strong> ${stats.sd_checked_labels_applied}<br>
-                    <strong>Repair jobs created:</strong> ${stats.repair_jobs_created}
+                    <strong>DONE labels removed:</strong> ${stats.done_labels_removed || 0}<br>
+                    <strong>THEMES_CHECK_DONE labels applied:</strong> ${stats.themes_check_done_labels_applied || stats.sd_checked_labels_applied || 0}<br>
+                    <strong>Repair jobs created:</strong> ${stats.repair_jobs_created || 0}
                     ${data.repair_job_ids && data.repair_job_ids.length > 0 ? '<br><strong>Repair Job IDs:</strong> ' + repairJobsList : ''}
                 </div>
             `;
@@ -519,6 +522,59 @@ async function runCheckup() {
                 currentJobId = data.repair_job_ids[0];
                 startPolling(data.repair_job_ids[0]);
             }
+        } else {
+            resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.detail}</div>`;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function removeCheckupLabels() {
+    const resultDiv = document.getElementById('checkupResult');
+    const btn = document.getElementById('removeLabelsBtn');
+
+    if (!confirm('Are you sure you want to remove all THEMES_CHECK_DONE labels? This will allow re-auditing all ad groups from scratch.')) {
+        return;
+    }
+
+    btn.disabled = true;
+    resultDiv.innerHTML = '<div class="alert alert-info">Removing THEMES_CHECK_DONE labels...</div>';
+
+    try {
+        const response = await fetch('/api/thema-ads/remove-checkup-labels', {
+            method: 'POST'
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            const stats = data.stats;
+
+            resultDiv.innerHTML = `
+                <div class="alert alert-success">
+                    <strong>Audit labels removed successfully!</strong><br>
+                    <hr>
+                    <div class="row text-center">
+                        <div class="col-md-4">
+                            <strong>Customers Processed</strong><br>
+                            <span class="badge bg-primary fs-6">${stats.customers_processed}</span>
+                        </div>
+                        <div class="col-md-4">
+                            <strong>Ad Groups Found</strong><br>
+                            <span class="badge bg-info fs-6">${stats.ad_groups_with_check_done_label}</span>
+                        </div>
+                        <div class="col-md-4">
+                            <strong>Labels Removed</strong><br>
+                            <span class="badge bg-success fs-6">${stats.check_done_labels_removed}</span>
+                        </div>
+                    </div>
+                    <hr>
+                    <p class="mb-0">You can now run a clean audit to re-check all ad groups.</p>
+                </div>
+            `;
         } else {
             resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.detail}</div>`;
         }

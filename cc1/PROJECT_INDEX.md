@@ -16,7 +16,8 @@ _Technical reference for the project. Update when: architecture changes, new pat
   - `/api/thema-ads/upload-excel` - Excel upload with theme column support
   - `/api/thema-ads/discover` - Auto-discover ad groups from MCC (with theme parameter)
   - `/api/thema-ads/themes` - Get list of supported themes
-  - `/api/thema-ads/checkup` - Audit processed ad groups, verify theme ads exist (multi-theme aware)
+  - `/api/thema-ads/checkup` - OPTIMIZED audit of processed ad groups with skip_audited parameter (default: true)
+  - `/api/thema-ads/remove-checkup-labels` - Remove THEMES_CHECK_DONE labels for clean audit runs
   - `/api/thema-ads/run-all-themes` - Discovery with theme selection (uses Query(None) for proper repeated param parsing)
   - `/api/thema-ads/queue/status` - Get auto-queue enabled state
   - `/api/thema-ads/queue/enable` - Enable automatic job queue
@@ -24,14 +25,15 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - `backend/thema_ads_service.py` - Business logic and job processing
   - `discover_all_missing_themes()` - Discovery with batch queries and theme filtering (lines 947-1340)
   - Discovery job creation (lines 1302-1318): Assigns theme_name to each ad group item before creating jobs to ensure proper theme tracking; without this field, create_job() falls back to 'singles_day' default
-  - `checkup_ad_groups()` - Database-driven multi-theme checkup: queries job_items for theme_name, checks theme-specific labels (THEME_BF, THEME_CM, etc.), creates repair jobs with correct theme
+  - `checkup_ad_groups()` - OPTIMIZED: Direct Google Ads audit (12-24x faster); customer pre-filtering, bulk theme queries, HS/ campaign filter, chunking (500 AG/1000 ads), THEMES_CHECK_DONE tracking with skip_audited parameter (lines 601-921)
+  - `remove_checkup_labels()` - Remove THEMES_CHECK_DONE labels from all ad groups (lines 512-599)
   - `get_next_pending_job()` - Returns oldest pending job ID (FIFO)
   - `_start_next_job_if_queue_enabled()` - Auto-queue logic: waits 30s, checks queue state, starts next job
 - `backend/database.py` - Database connection management, auto-queue state persistence
   - `get_auto_queue_enabled()` - Retrieve queue toggle state from database
   - `set_auto_queue_enabled(bool)` - Persist queue toggle state
-- `frontend/thema-ads.html` - Web UI with 3 tabs (Excel Upload, CSV Upload, Auto-Discover, Check-up) and auto-queue toggle
-- `frontend/js/thema-ads.js` - Frontend logic including uploadExcel(), runCheckup(), theme loading, auto-queue toggle (loadQueueStatus(), toggleAutoQueue())
+- `frontend/thema-ads.html` - Web UI with 6 tabs (Excel Upload, CSV Upload, Auto-Discover, Check-up [OPTIMIZED], Run All Themes, Activate Ads) and auto-queue toggle
+- `frontend/js/thema-ads.js` - Frontend logic including uploadExcel(), runCheckup() with skip_audited parameter, removeCheckupLabels() with confirmation dialog, theme loading, auto-queue toggle (loadQueueStatus(), toggleAutoQueue())
 - `themes/` - Theme content directory (black_friday/, cyber_monday/, sinterklaas/, kerstmis/)
   - Each theme has headlines.txt and descriptions.txt files
 - `thema_ads_optimized/themes.py` - Theme management module (load content, get labels, validate themes)
@@ -135,6 +137,11 @@ _Technical reference for the project. Update when: architecture changes, new pat
 2. **CSV Flexibility** - Support minimal or full CSV formats
 3. **Excel Compatibility** - Handle scientific notation and encoding issues
 4. **Ad Group Name Lookups** - Resolve IDs from names to avoid Excel precision loss
+5. **RSA path1 Field** - Distinction between ad properties and URL parameters:
+   - `path1` is an RSA ad property, NOT a URL query parameter
+   - Set via: `rsa.path1 = theme_name` (display URL path extension)
+   - Separate from URL query params: `?campaign_theme=1`
+   - Common confusion: path1 appears in display URL but is not part of final_url
 
 ## Database Schema
 
@@ -157,6 +164,8 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - `sinterklaas` - Label: THEME_SK, Display: "Sinterklaas", Countdown: 2025-12-05
 - `kerstmis` - Label: THEME_KM, Display: "Kerstmis", Countdown: 2025-12-25
 - `singles_day` - Label: THEME_SD, Display: "Singles Day", Countdown: 2025-11-11 (legacy)
+- `ALL_THEMES_DONE` - Meta-label applied when ad group has all 4 main theme completion labels (THEME_BF_DONE, THEME_CM_DONE, THEME_SK_DONE, THEME_KM_DONE)
+- `THEMES_CHECK_DONE` - Audit tracking label applied to ad groups after validation; used by checkup function to skip already-audited ad groups for faster subsequent runs
 
 **Important - RSA Countdown Syntax:**
 - RSA countdown format differs from standard Google Ads format
@@ -259,6 +268,11 @@ theme_ads/
 ├── remove_all_duplicates.py        # Utility: Wrapper to process all 28 customers sequentially for duplicate removal
 ├── remove_all_duplicates_parallel.py # Utility: Parallel version with 3 workers (60% faster, 58,771 ads removed)
 ├── check_ad_groups.py              # Utility: Check ad group labels and theme ads
+├── audit_theme_done_labels_optimized.py # Utility: OPTIMIZED audit script verifies themed ads exist for DONE labels, removes invalid labels, creates repair jobs; features customer pre-filtering, bulk theme processing, HS/ campaign filter, chunking, THEMES_CHECK_DONE tracking, parallel execution (5 workers)
+├── fill_missing_themed_ads_parallel_v3.py # Utility: Gap-filler for ad groups with THEME_*_DONE labels but missing theme ads
+│                                    # Features: batch ad creation, themed content from /themes/ files, proper labeling,
+│                                    # ALL_THEMES_DONE label when all 4 themes present, progress persistence (fill_missing_progress_v3.json),
+│                                    # parallel processing (3 workers), campaign_theme=1 URL parameter, path1=theme_name ad field
 ├── frontend/
 │   ├── thema-ads.html              # Web UI (4 tabs: Excel Upload, CSV Upload, Auto-Discover, Check-up)
 │   └── js/

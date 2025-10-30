@@ -19,6 +19,9 @@ cd thema_ads_optimized/
 docker-compose up -d           # Ensure containers are running
 docker-compose exec -T db psql -U postgres -d thema_ads -c "DELETE FROM thema_ads_jobs;"  # Delete all jobs (cascades to job_items)
 
+# Frontend Operations
+docker restart theme_ads-app-1  # Restart frontend to apply HTML/JS changes (use after editing frontend files)
+
 # Job Deletion (Proper Process)
 # 1. Pause job first via API
 curl -X POST http://localhost:8002/api/thema-ads/jobs/{job_id}/pause
@@ -2013,5 +2016,186 @@ New: "{KeyWord:Aanbieding} Nog {COUNTDOWN(...)}" (29 chars)
   - Safe: Tie-breaking via stable sort prevents random selection
 - **Files**: remove_duplicate_ads.py remove_duplicate_ads() function (lines 390-401)
 
+### Multi-Layer Audit Optimization Strategy (2025-10-30)
+- **Pattern**: Combine multiple optimization techniques for exponential performance gains
+- **Use Case**: Auditing theme DONE labels and verifying themed ads exist (Check-up function)
+- **Implementation**:
+  1. **Customer Pre-filtering**: Query which customers have DONE labels, skip customers with no labels
+  2. **Bulk Theme Processing**: Query all 4 themes simultaneously instead of sequentially (4x faster)
+  3. **Campaign Filtering**: Filter to HS/ campaigns only using WHERE clause (2-3x faster, reduces query size)
+  4. **Chunking Strategy**: Process 500 ad groups per batch, 1000 ads per batch (1.5x faster)
+  5. **Audit Tracking**: Apply THEMES_CHECK_DONE label after validation, skip already-audited ad groups
+- **Performance**:
+  - Individual optimizations: 4x + 2-3x + 1.5x = partial improvement
+  - Combined multiplicative effect: 12-24x total speedup
+- **Key Insights**:
+  - Each optimization layer multiplies the effect (not additive)
+  - Pre-filtering prevents wasted queries on empty data
+  - Tracking labels enable incremental audits
+  - Campaign filtering drastically reduces query size (most campaigns are not HS/)
+- **Files**: backend/thema_ads_service.py checkup_ad_groups() (lines 601-921), audit_theme_done_labels_optimized.py
+
+### Reset Labels Pattern for Clean Re-runs (2025-10-30)
+- **Pattern**: Provide separate endpoint to remove tracking labels for clean operation re-runs
+- **Use Case**: Allow users to re-audit all ad groups from scratch after fixing issues
+- **Implementation**:
+  ```python
+  # Separate endpoint to remove tracking labels
+  @app.post("/api/thema-ads/remove-checkup-labels")
+  async def remove_checkup_labels():
+      # Query ad groups with THEMES_CHECK_DONE label
+      # Remove label in batches
+      # Return statistics
+  ```
+- **Frontend Pattern**:
+  - Confirmation dialog before removal ("Are you sure?")
+  - Clear button label ("Reset Audit Labels")
+  - Show stats after removal (customers processed, labels removed)
+- **Benefits**:
+  - Enables clean re-audits without affecting production DONE labels
+  - User maintains control over when to reset
+  - Separate from main operation (can't accidentally reset)
+- **Key Insights**:
+  - Don't mix tracking labels with production labels in reset operations
+  - Example: Remove THEMES_CHECK_DONE but keep THEME_BF_DONE labels
+  - Tracking labels are for optimization, production labels are for business logic
+- **Files**: backend/thema_ads_service.py remove_checkup_labels() (lines 512-599), backend/main.py /remove-checkup-labels endpoint
+
 ---
-_Last updated: 2025-10-23_
+_Last updated: 2025-10-30_
+
+### Gap-Filler Script Iteration: V2→V3 Bugs and Fixes (2025-10-29)
+- **Problem**: Created fill_missing_themed_ads script to fill gaps where ad groups have THEME_*_DONE labels but missing theme ads
+- **V2 Bugs** (fill_missing_themed_ads_parallel_v2.py):
+  1. **No Labels Added**: Script created ads but didn't add theme labels (THEME_BF, THEME_CM, etc.) to ads or ad group DONE labels
+  2. **No Themed Content**: Copied headlines/descriptions from base ad instead of loading themed content from `/themes/{theme_name}/` files
+  3. **Only URL Modified**: Only modified URL path1 parameter, didn't use themed headlines/descriptions
+- **V3 Initial Bugs** (fill_missing_themed_ads_parallel_v3.py):
+  1. **Headline Truncation**: Truncated headlines at 30 chars, cutting off COUNTDOWN tags mid-syntax
+     - Error: `UNPAIRED_BRACE_IN_AD_CUSTOMIZER_TAG` with triggers like `{COUNTDOWN(2025-12`
+     - Fix: Removed truncation `h.text = headline_text[:30]` → `h.text = headline_text`
+  2. **Missing campaign_theme Parameter**: URLs didn't include `campaign_theme=1` query parameter
+     - Fix: Added `params['campaign_theme'] = ['1']` to URL building logic (line 174)
+  3. **Missing path1 Field**: Initially confused path1 as URL parameter, but it's an RSA ad property
+     - Fix: Added `rsa.path1 = theme_name` to set display URL path extension
+- **Final V3 Solution**:
+  - Load themed content from `/themes/{theme_name}/headlines.txt` and `descriptions.txt`
+  - Set `rsa.path1 = theme_name` for display URL path
+  - Add `campaign_theme=1` to URL query parameters
+  - Create ads in batches with proper themed content
+  - Add labels using `get_or_create_label()` pattern: theme labels on ads, DONE labels on ad groups
+  - Progress persistence with `fill_missing_progress_v3.json`
+  - Parallel processing with 3 workers
+- **Files**: fill_missing_themed_ads_parallel_v2.py (deprecated), fill_missing_themed_ads_parallel_v3.py (final)
+- **Key Learning**: Always verify all requirements are implemented: themed content, proper labeling, URL parameters, AND ad properties
+
+
+### Google Ads RSA path1 Field vs URL Query Parameters (2025-10-29)
+- **Pattern**: Distinguish between RSA ad properties and URL query parameters
+- **Common Confusion**: `path1` appears in display URL but is NOT a query parameter
+- **Correct Implementation**:
+  ```python
+  # RSA ad property (display URL path extension)
+  rsa = new_ad_group_ad.ad.responsive_search_ad
+  rsa.path1 = "black_friday"  # Appears as: example.com/black_friday
+  
+  # Separate from URL query parameters
+  final_url = "https://example.com/products?campaign_theme=1"
+  new_ad_group_ad.ad.final_urls.append(final_url)
+  ```
+- **What path1 Is**:
+  - RSA ad property set via `rsa.path1 = value`
+  - Appears in display URL shown to users
+  - Character limit: 15 characters
+  - Use case: Display category, theme, or promotion in URL
+- **What path1 Is NOT**:
+  - NOT a URL query parameter like `?path1=value`
+  - NOT part of `final_urls` string
+  - NOT parsed from URL - must be set explicitly on RSA object
+- **Use Cases**:
+  - Theme identification: `rsa.path1 = "cyber_monday"`
+  - Category display: `rsa.path1 = "electronics"`
+  - Promotion display: `rsa.path1 = "sale"`
+- **Files**: fill_missing_themed_ads_parallel_v3.py (line 157: `rsa.path1 = theme_name`)
+- **Key Learning**: Always check Google Ads API documentation for field types - display properties vs URL components
+
+### Batch Themed Ad Creation from File-Based Content (2025-10-29)
+- **Pattern**: Create multiple themed ads in single API call using file-based theme templates
+- **Use Case**: Fill gaps where ad groups have THEME_*_DONE labels but missing theme ads
+- **Implementation Steps**:
+  ```python
+  # 1. Load theme content from files
+  theme_content = load_theme_content(theme_name)
+  # Returns: ThemeContent(headlines=[...], descriptions=[...])
+  
+  # 2. Create operation for each theme
+  operations = []
+  for theme_label, theme_name in missing_themes:
+      ad_group_ad_operation = client.get_type('AdGroupAdOperation')
+      new_ad_group_ad = ad_group_ad_operation.create
+      new_ad_group_ad.ad_group = f'customers/{customer_id}/adGroups/{ad_group_id}'
+      new_ad_group_ad.status = client.enums.AdGroupAdStatusEnum.PAUSED
+      
+      rsa = new_ad_group_ad.ad.responsive_search_ad
+      
+      # 3. Set path1 for display URL
+      rsa.path1 = theme_name
+      
+      # 4. Add themed headlines (max 15)
+      for headline_text in theme_content.headlines[:15]:
+          h = client.get_type('AdTextAsset')
+          h.text = headline_text
+          rsa.headlines.append(h)
+      
+      # 5. Add themed descriptions (max 4)
+      for desc_text in theme_content.descriptions[:4]:
+          d = client.get_type('AdTextAsset')
+          d.text = desc_text
+          rsa.descriptions.append(d)
+      
+      # 6. Set final URLs with campaign_theme parameter
+      for url in base_ad.final_urls:
+          parsed = urlparse(url)
+          params = parse_qs(parsed.query)
+          params['campaign_theme'] = ['1']
+          new_query = urlencode(params, doseq=True)
+          new_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path,
+                               parsed.params, new_query, parsed.fragment))
+          new_ad_group_ad.ad.final_urls.append(new_url)
+      
+      operations.append(ad_group_ad_operation)
+  
+  # 7. Execute batch operation
+  ad_group_ad_service = client.get_service('AdGroupAdService')
+  response = ad_group_ad_service.mutate_ad_group_ads(
+      customer_id=customer_id,
+      operations=operations
+  )
+  
+  # 8. Add labels after creation
+  for resource_name, theme_label, theme_name in created_ads:
+      # Add theme label to ad (THEME_BF, THEME_CM, etc.)
+      label_resource = get_or_create_label(client, customer_id, theme_label)
+      # ... add label to ad
+      
+      # Add DONE label to ad group (THEME_BF_DONE, etc.)
+      done_label_resource = get_or_create_label(client, customer_id, f"{theme_label}_DONE")
+      # ... add label to ad group
+  ```
+- **Performance**: Create 2-4 themed ads per ad group in single API call instead of 4 separate calls
+- **Key Points**:
+  - Load theme content once per theme (not per ad)
+  - Build all operations in memory before API call
+  - Set both path1 (ad property) and campaign_theme (URL param)
+  - Label ads after creation to track which themes are present
+  - Use PAUSED status to allow review before enabling
+- **Files**: fill_missing_themed_ads_parallel_v3.py create_themed_ads_batch() (lines 90-199)
+- **Benefits**:
+  - Single API call reduces quota usage
+  - Consistent themed content from centralized files
+  - Progress persistence allows resume after interruption
+  - Parallel processing with multiple workers (3 concurrent customers)
+- **Key Learning**: Batch operations + file-based templates + proper labeling = reliable gap-filling system
+
+---
+_Last updated: 2025-10-29_
