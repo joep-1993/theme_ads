@@ -2480,10 +2480,28 @@ class ThemaAdsService:
                                 operation.update_mask.paths.append('status')
                                 pause_operations.append(operation)
 
-                # Step 4: Execute batch mutations
+                # Step 4: Pause original ads FIRST (to avoid 3-ad limit)
+                if pause_operations:
+                    try:
+                        chunk_size = 1000  # Reduced from 5000 to avoid timeouts
+                        for i in range(0, len(pause_operations), chunk_size):
+                            chunk = pause_operations[i:i+chunk_size]
+                            ad_group_ad_service.mutate_ad_group_ads(
+                                customer_id=customer_id,
+                                operations=chunk
+                            )
+                        logger.info(f"[{customer_id}] Paused {len(pause_operations)} THEMA_ORIGINAL ads")
+                        async with stats_lock:
+                            stats['original_ads_paused'] += len(pause_operations)
+                    except Exception as e:
+                        logger.error(f"[{customer_id}] Failed to pause THEMA_ORIGINAL ads: {e}")
+                        async with stats_lock:
+                            stats['errors'].append(f"{customer_id}: Failed to pause THEMA_ORIGINAL ads - {e}")
+
+                # Step 5: Enable theme ads AFTER pausing originals
                 if enable_operations:
                     try:
-                        chunk_size = 5000
+                        chunk_size = 1000  # Reduced from 5000 to avoid timeouts
                         for i in range(0, len(enable_operations), chunk_size):
                             chunk = enable_operations[i:i+chunk_size]
                             ad_group_ad_service.mutate_ad_group_ads(
@@ -2498,23 +2516,6 @@ class ThemaAdsService:
                         logger.error(f"[{customer_id}] Failed to enable theme ads: {e}")
                         async with stats_lock:
                             stats['errors'].append(f"{customer_id}: Failed to enable theme ads - {e}")
-
-                if pause_operations:
-                    try:
-                        chunk_size = 5000
-                        for i in range(0, len(pause_operations), chunk_size):
-                            chunk = pause_operations[i:i+chunk_size]
-                            ad_group_ad_service.mutate_ad_group_ads(
-                                customer_id=customer_id,
-                                operations=chunk
-                            )
-                        logger.info(f"[{customer_id}] Paused {len(pause_operations)} THEMA_ORIGINAL ads")
-                        async with stats_lock:
-                            stats['original_ads_paused'] += len(pause_operations)
-                    except Exception as e:
-                        logger.error(f"[{customer_id}] Failed to pause THEMA_ORIGINAL ads: {e}")
-                        async with stats_lock:
-                            stats['errors'].append(f"{customer_id}: Failed to pause THEMA_ORIGINAL ads - {e}")
 
                 async with stats_lock:
                     stats['customers_processed'] += 1
