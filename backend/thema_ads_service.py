@@ -2455,67 +2455,73 @@ class ThemaAdsService:
                     except Exception as e:
                         logger.warning(f"[{customer_id}] Could not query THEMA_ORIGINAL ads: {e}")
 
-                # Step 3: Build batch operations
-                enable_operations = []
-                pause_operations = []
+                # Step 3: Process ad groups in batches (pause→enable immediately per batch)
+                # This minimizes time gap between pausing originals and enabling theme ads
+                ad_groups_list = list(theme_ads_by_ag.items())
+                batch_size = 100  # Process 100 ad groups at a time
 
-                for ag_res, theme_ad in theme_ads_by_ag.items():
-                    # Enable theme ad if paused
-                    if theme_ad['status'] == 'PAUSED':
-                        operation = client.get_type("AdGroupAdOperation")
-                        ad_group_ad = operation.update
-                        ad_group_ad.resource_name = theme_ad['resource']
-                        ad_group_ad.status = client.enums.AdGroupAdStatusEnum.ENABLED
-                        operation.update_mask.paths.append('status')
-                        enable_operations.append(operation)
+                total_paused = 0
+                total_enabled = 0
 
-                    # Pause all THEMA_ORIGINAL ads in this ad group
-                    if ag_res in original_ads_by_ag:
-                        for orig_ad in original_ads_by_ag[ag_res]:
-                            if orig_ad['status'] == 'ENABLED':
-                                operation = client.get_type("AdGroupAdOperation")
-                                ad_group_ad = operation.update
-                                ad_group_ad.resource_name = orig_ad['resource']
-                                ad_group_ad.status = client.enums.AdGroupAdStatusEnum.PAUSED
-                                operation.update_mask.paths.append('status')
-                                pause_operations.append(operation)
+                for batch_idx in range(0, len(ad_groups_list), batch_size):
+                    batch = ad_groups_list[batch_idx:batch_idx+batch_size]
 
-                # Step 4: Pause original ads FIRST (to avoid 3-ad limit)
-                if pause_operations:
-                    try:
-                        chunk_size = 1000  # Reduced from 5000 to avoid timeouts
-                        for i in range(0, len(pause_operations), chunk_size):
-                            chunk = pause_operations[i:i+chunk_size]
+                    pause_operations = []
+                    enable_operations = []
+
+                    # Build operations for this batch of ad groups
+                    for ag_res, theme_ad in batch:
+                        # Pause all THEMA_ORIGINAL ads in this ad group FIRST
+                        if ag_res in original_ads_by_ag:
+                            for orig_ad in original_ads_by_ag[ag_res]:
+                                if orig_ad['status'] == 'ENABLED':
+                                    operation = client.get_type("AdGroupAdOperation")
+                                    ad_group_ad = operation.update
+                                    ad_group_ad.resource_name = orig_ad['resource']
+                                    ad_group_ad.status = client.enums.AdGroupAdStatusEnum.PAUSED
+                                    operation.update_mask.paths.append('status')
+                                    pause_operations.append(operation)
+
+                        # Enable theme ad if paused
+                        if theme_ad['status'] == 'PAUSED':
+                            operation = client.get_type("AdGroupAdOperation")
+                            ad_group_ad = operation.update
+                            ad_group_ad.resource_name = theme_ad['resource']
+                            ad_group_ad.status = client.enums.AdGroupAdStatusEnum.ENABLED
+                            operation.update_mask.paths.append('status')
+                            enable_operations.append(operation)
+
+                    # Step 4: Execute pause operations for this batch
+                    if pause_operations:
+                        try:
                             ad_group_ad_service.mutate_ad_group_ads(
                                 customer_id=customer_id,
-                                operations=chunk
+                                operations=pause_operations
                             )
-                        logger.info(f"[{customer_id}] Paused {len(pause_operations)} THEMA_ORIGINAL ads")
-                        async with stats_lock:
-                            stats['original_ads_paused'] += len(pause_operations)
-                    except Exception as e:
-                        logger.error(f"[{customer_id}] Failed to pause THEMA_ORIGINAL ads: {e}")
-                        async with stats_lock:
-                            stats['errors'].append(f"{customer_id}: Failed to pause THEMA_ORIGINAL ads - {e}")
+                            total_paused += len(pause_operations)
+                        except Exception as e:
+                            logger.error(f"[{customer_id}] Batch {batch_idx//batch_size + 1}: Failed to pause THEMA_ORIGINAL ads: {e}")
+                            async with stats_lock:
+                                stats['errors'].append(f"{customer_id}: Batch {batch_idx//batch_size + 1}: Failed to pause - {e}")
 
-                # Step 5: Enable theme ads AFTER pausing originals
-                if enable_operations:
-                    try:
-                        chunk_size = 1000  # Reduced from 5000 to avoid timeouts
-                        for i in range(0, len(enable_operations), chunk_size):
-                            chunk = enable_operations[i:i+chunk_size]
+                    # Step 5: Immediately enable theme ads for this batch (minimize gap)
+                    if enable_operations:
+                        try:
                             ad_group_ad_service.mutate_ad_group_ads(
                                 customer_id=customer_id,
-                                operations=chunk
+                                operations=enable_operations
                             )
-                        logger.info(f"[{customer_id}] Enabled {len(enable_operations)} theme ads")
-                        async with stats_lock:
-                            stats['theme_ads_enabled'] += len(enable_operations)
-                            stats['ad_groups_activated'] += len(theme_ads_by_ag)
-                    except Exception as e:
-                        logger.error(f"[{customer_id}] Failed to enable theme ads: {e}")
-                        async with stats_lock:
-                            stats['errors'].append(f"{customer_id}: Failed to enable theme ads - {e}")
+                            total_enabled += len(enable_operations)
+                        except Exception as e:
+                            logger.error(f"[{customer_id}] Batch {batch_idx//batch_size + 1}: Failed to enable theme ads: {e}")
+                            async with stats_lock:
+                                stats['errors'].append(f"{customer_id}: Batch {batch_idx//batch_size + 1}: Failed to enable - {e}")
+
+                logger.info(f"[{customer_id}] Paused {total_paused} THEMA_ORIGINAL ads, Enabled {total_enabled} theme ads")
+                async with stats_lock:
+                    stats['original_ads_paused'] += total_paused
+                    stats['theme_ads_enabled'] += total_enabled
+                    stats['ad_groups_activated'] += len(theme_ads_by_ag)
 
                 async with stats_lock:
                     stats['customers_processed'] += 1
