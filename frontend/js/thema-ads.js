@@ -731,13 +731,15 @@ async function loadActivationPlan() {
 async function activateAds() {
     const customerIdsInput = document.getElementById('activateCustomerIds').value;
     const resetLabels = document.getElementById('activateResetLabels').checked;
+    const parallelWorkers = parseInt(document.getElementById('activateParallelWorkers').value) || 5;
     const resultDiv = document.getElementById('activateResult');
     const btn = document.getElementById('activateAdsBtn');
 
     btn.disabled = true;
     resultDiv.innerHTML = `
         <div class="alert alert-info">
-            <strong>Activating ads...</strong><br>
+            <strong>Activating ads (optimized)...</strong><br>
+            Processing ${parallelWorkers} customers in parallel for maximum speed.<br>
             This may take several minutes depending on the number of ad groups.<br>
             Please wait...
         </div>
@@ -753,11 +755,12 @@ async function activateAds() {
         // Build query parameters
         const params = new URLSearchParams();
         if (resetLabels) params.append('reset_labels', 'true');
+        params.append('parallel_workers', parallelWorkers);
         if (customerIds) {
             customerIds.forEach(id => params.append('customer_ids', id));
         }
 
-        const response = await fetch(`/api/thema-ads/activate-ads?${params.toString()}`, {
+        const response = await fetch(`/api/thema-ads/activate-optimized?${params.toString()}`, {
             method: 'POST'
         });
 
