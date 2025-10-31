@@ -760,7 +760,7 @@ async function activateAds() {
             customerIds.forEach(id => params.append('customer_ids', id));
         }
 
-        const response = await fetch(`/api/thema-ads/activate-optimized?${params.toString()}`, {
+        const response = await fetch(`/api/thema-ads/activate-ads?${params.toString()}`, {
             method: 'POST'
         });
 
