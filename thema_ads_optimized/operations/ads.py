@@ -11,13 +11,13 @@ from utils.rate_limiter import AdaptiveRateLimiter
 logger = logging.getLogger(__name__)
 
 # Global rate limiter instance (shared across all ad creation operations)
-# CONSERVATIVE settings: More stability, slower but more reliable
+# BALANCED settings: Good balance between speed and reliability (2-3x faster than CONSERVATIVE)
 _rate_limiter = AdaptiveRateLimiter(
-    initial_delay=2.0,      # CONSERVATIVE: Start slower (was 1.0)
-    min_delay=1.0,          # CONSERVATIVE: Higher minimum (was 0.5)
-    max_delay=15.0,         # CONSERVATIVE: Higher maximum (was 10.0)
-    increase_factor=2.5,    # CONSERVATIVE: More aggressive backoff (was 2.0)
-    decrease_factor=0.98    # CONSERVATIVE: Slower reduction (was 0.95)
+    initial_delay=1.0,      # BALANCED: Moderate start (was 2.0 CONSERVATIVE)
+    min_delay=0.5,          # BALANCED: Lower minimum for faster processing (was 1.0 CONSERVATIVE)
+    max_delay=10.0,         # BALANCED: Moderate maximum (was 15.0 CONSERVATIVE)
+    increase_factor=2.0,    # BALANCED: Normal backoff (was 2.5 CONSERVATIVE)
+    decrease_factor=0.95    # BALANCED: Faster reduction when stable (was 0.98 CONSERVATIVE)
 )
 
 

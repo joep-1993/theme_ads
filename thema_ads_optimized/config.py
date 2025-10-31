@@ -20,13 +20,13 @@ class GoogleAdsConfig:
 @dataclass
 class PerformanceConfig:
     """Performance tuning settings."""
-    max_concurrent_customers: int = 5  # CONSERVATIVE: Reduced from 10 for API stability
+    max_concurrent_customers: int = 10  # BALANCED: Increased from 5 for 2x throughput (combined with other optimizations)
     max_concurrent_operations: int = 50
     batch_size: int = 5000  # Keep at 5000 to avoid 503 errors
     api_retry_attempts: int = 5  # Increased for 503 retry handling
     api_retry_delay: float = 2.0  # Increased from 1.0
     api_batch_delay: float = 2.0  # Increased from 0.5 to avoid rate limits
-    customer_delay: float = 15.0  # CONSERVATIVE: Increased from 5.0s for more spacing
+    customer_delay: float = 5.0  # BALANCED: Reduced from 15.0s for faster customer transitions
     enable_caching: bool = True
 
 
