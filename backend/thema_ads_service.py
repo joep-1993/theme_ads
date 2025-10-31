@@ -943,31 +943,72 @@ class ThemaAdsService:
                     operations = []
                     audit_operations = []
 
-                    # Simple check: Query which ad groups have themed ads
-                    # For performance, we'll just check if the theme label exists on the ad group's ads
-                    # This is a simplified version - full implementation would check ads with the theme label
+                    # Step 3.1: Batch query all ads for these ad groups to check for theme labels
+                    theme_label_resource = theme_mappings[theme].get('theme_label_resource')
 
+                    # Build map of ad group resource -> has theme ad
+                    ag_has_theme_ad = {}
+
+                    if theme_label_resource:
+                        # Query ads with the theme label in batches
+                        BATCH_SIZE = 500
+                        for batch_start in range(0, len(ad_groups_list), BATCH_SIZE):
+                            batch = ad_groups_list[batch_start:batch_start + BATCH_SIZE]
+                            ag_resources_str = "', '".join([ag['resource'] for ag in batch])
+
+                            ads_query = f"""
+                                SELECT
+                                    ad_group_ad.ad_group,
+                                    ad_group_ad_label.label
+                                FROM ad_group_ad_label
+                                WHERE ad_group_ad_label.label = '{theme_label_resource}'
+                                AND ad_group_ad.ad_group IN ('{ag_resources_str}')
+                                AND ad_group_ad.status != REMOVED
+                            """
+
+                            try:
+                                ads_response = ga_service.search(customer_id=customer_id, query=ads_query)
+                                for row in ads_response:
+                                    ag_resource = row.ad_group_ad.ad_group
+                                    ag_has_theme_ad[ag_resource] = True
+                            except Exception as e:
+                                logger.warning(f"[{customer_id}] Theme {theme}: Failed to query ads batch: {e}")
+
+                        logger.info(f"[{customer_id}] Theme {theme}: Found {len(ag_has_theme_ad)} ad groups with theme ads")
+                    else:
+                        logger.warning(f"[{customer_id}] Theme {theme}: No theme label resource found, assuming all need repair")
+
+                    # Step 3.2: Check each ad group and mark for repair if theme ad is missing
                     for ag in ad_groups_list:
                         stats['ad_groups_checked'] += 1
 
-                        # For now, mark all as needing repair since we're replacing the check-up function
-                        # In production, you'd query the ads and their labels here
-                        # For this implementation, we'll assume if they have DONE label but we need to verify
+                        # Check if this ad group has a theme ad
+                        has_theme_ad = ag_has_theme_ad.get(ag['resource'], False)
 
-                        stats['ad_groups_missing_theme_ads'] += 1
-                        repair_items.append({
-                            'customer_id': customer_id,
-                            'campaign_id': ag['campaign_id'],
-                            'campaign_name': ag['campaign_name'],
-                            'ad_group_id': ag['id'],
-                            'ad_group_name': ag['name'],
-                            'theme_name': theme
-                        })
+                        if not has_theme_ad:
+                            # Missing theme ad - mark for repair
+                            stats['ad_groups_missing_theme_ads'] += 1
+                            repair_items.append({
+                                'customer_id': customer_id,
+                                'campaign_id': ag['campaign_id'],
+                                'campaign_name': ag['campaign_name'],
+                                'ad_group_id': ag['id'],
+                                'ad_group_name': ag['name'],
+                                'theme_name': theme
+                            })
 
-                        # Remove DONE label
-                        operation = client.get_type('AdGroupLabelOperation')
-                        operation.remove = ag['label_resource']
-                        operations.append(operation)
+                            # Remove DONE label since the theme ad is missing
+                            operation = client.get_type('AdGroupLabelOperation')
+                            operation.remove = ag['label_resource']
+                            operations.append(operation)
+                        else:
+                            # Has theme ad - add THEMES_CHECK_DONE label to mark as validated
+                            if audit_label_resource:
+                                audit_op = client.get_type('AdGroupLabelOperation')
+                                audit_op.create.ad_group = ag['resource']
+                                audit_op.create.label = audit_label_resource
+                                audit_operations.append(audit_op)
+                                stats['audit_labels_added'] += 1
 
                     # Execute removals
                     if operations:
@@ -980,6 +1021,21 @@ class ThemaAdsService:
                             logger.info(f"[{customer_id}] Theme {theme}: Removed {len(response.results)} {done_label} labels")
                         except Exception as e:
                             logger.warning(f"[{customer_id}] Theme {theme}: Error removing labels: {e}")
+
+                    # Execute audit label additions for validated ad groups
+                    if audit_operations:
+                        try:
+                            # Process in batches of 5000
+                            AUDIT_BATCH_SIZE = 5000
+                            for batch_start in range(0, len(audit_operations), AUDIT_BATCH_SIZE):
+                                batch = audit_operations[batch_start:batch_start + AUDIT_BATCH_SIZE]
+                                response = ad_group_label_service.mutate_ad_group_labels(
+                                    customer_id=customer_id,
+                                    operations=batch
+                                )
+                                logger.info(f"[{customer_id}] Theme {theme}: Added {len(response.results)} THEMES_CHECK_DONE labels")
+                        except Exception as e:
+                            logger.warning(f"[{customer_id}] Theme {theme}: Error adding audit labels: {e}")
 
                 logger.info(f"[{customer_id}]: Completed audit")
 

@@ -217,6 +217,30 @@ Successfully achieved **3-5x performance improvement** for theme ad creation (5 
   - backend/migrations/add_theme_support.sql (removed DEFAULT)
 - **Result**: Discovery now creates jobs ONLY for explicitly selected themes
 
+### Checkup Function Marking All Ad Groups for Repair Without Verification (2025-10-31)
+- **Problem**: Checkup function marked ALL ad groups with DONE labels for repair without actually verifying if theme ads exist
+- **Symptoms**: Running checkup would remove all DONE labels and create repair jobs for every ad group, even those with valid theme ads
+- **Root Cause**: Implementation used placeholder comment "For now, mark all as needing repair" and blindly added all ad groups to repair list without querying Google Ads API
+- **Solution**: Added batch query validation to verify theme ads actually exist before marking for repair
+  1. **Query theme-labeled ads** (backend/thema_ads_service.py lines 952-977):
+     ```python
+     # Query ads with the theme label in batches
+     ads_query = f"""
+         SELECT ad_group_ad.ad_group, ad_group_ad_label.label
+         FROM ad_group_ad_label
+         WHERE ad_group_ad_label.label = '{theme_label_resource}'
+         AND ad_group_ad.ad_group IN ('{ag_resources_str}')
+         AND ad_group_ad.status != REMOVED
+     """
+     # Build map: ag_resource -> has_theme_ad
+     ```
+  2. **Distinguish valid vs invalid** (lines 982-1011):
+     - Ad groups WITH theme ads: Add THEMES_CHECK_DONE label (validated)
+     - Ad groups WITHOUT theme ads: Remove DONE label + create repair job (genuinely broken)
+- **Key Insight**: Audits must query actual Google Ads data, not just rely on labels; labels can be out of sync with reality
+- **Performance**: Batch queries (500 ad groups at a time) keep audit fast while adding proper validation
+- **Result**: Checkup now only repairs ad groups genuinely missing theme ads, preserves valid DONE labels
+
 ### Google Ads API Resource Name Format for Ad Group Ads (2025-10-24)
 - **Problem**: Malformed resource name error when working with ad_group_ad resources
 - **Error**: `Resource name 'customers/{customer_id}/adGroups/{ad_group_id}/ads/{ad_id}' is malformed: expected 'customers/{customer_id}/adGroupAds/{ad_group_id}~{ad_id}'`
@@ -2121,6 +2145,41 @@ New: "{KeyWord:Aanbieding} Nog {COUNTDOWN(...)}" (29 chars)
 - **Impact**: All themes now validated and ready for production use
 
 ## Patterns
+
+### Checkup Validation Pattern - Query Actual Data Not Just Labels (2025-10-31)
+- **Pattern**: Proper audit/validation requires checking actual Google Ads data, not just labels
+- **Problem**: Labels can be out of sync with reality (e.g., DONE label exists but theme ad was deleted)
+- **Anti-Pattern**: Trusting labels alone without verification
+  ```python
+  # ❌ BAD: Assume DONE label means ad exists
+  if 'THEME_BF_DONE' in ad_group_labels:
+      skip_this_ad_group()  # Might skip ad groups that need repair!
+  ```
+- **Solution**: Query Google Ads API to verify actual ads exist
+  ```python
+  # ✅ GOOD: Query for actual theme-labeled ads
+  ads_query = f"""
+      SELECT ad_group_ad.ad_group
+      FROM ad_group_ad_label
+      WHERE ad_group_ad_label.label = '{theme_label_resource}'
+      AND ad_group_ad.ad_group IN ('{ad_group_resources}')
+      AND ad_group_ad.status != REMOVED
+  """
+  ag_has_theme_ad = {row.ad_group_ad.ad_group: True for row in response}
+
+  # Now distinguish valid vs invalid
+  if ag_resource in ag_has_theme_ad:
+      # Has theme ad - add audit label, keep DONE label
+      add_audit_label(ag_resource)
+  else:
+      # Missing theme ad - remove DONE label, create repair job
+      remove_done_label(ag_resource)
+      create_repair_job(ag_resource)
+  ```
+- **Implementation**: backend/thema_ads_service.py:946-1011 (checkup_ad_groups)
+- **Performance**: Batch queries (500 ad groups at a time) keep validation fast
+- **Benefit**: Prevents false positives, only repairs genuinely broken ad groups
+- **Use Cases**: Checkup audits, quality assurance, gap detection
 
 ### Batch Query Optimization for Google Ads API (2025-10-24)
 - **Pattern**: Eliminate N+1 query anti-pattern by batching with IN clauses

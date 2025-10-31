@@ -8,7 +8,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - **Database**: PostgreSQL for job persistence
 - **Google Ads**: API v28+ integration
 - **Processing**: Batch operations with pause/resume
-- **Quality Assurance**: Check-up function audits processed ad groups, verifies ad integrity, creates repair jobs
+- **Quality Assurance**: Check-up function audits processed ad groups by querying Google Ads API to verify theme ads exist (not just labels), distinguishes valid vs invalid DONE labels, creates repair jobs only for genuinely missing ads
 
 ### Key Components
 - `backend/main.py` - FastAPI API endpoints (CSV upload, Excel upload, auto-discovery, checkup, activation, queue management)
@@ -27,7 +27,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - `backend/thema_ads_service.py` - Business logic and job processing
   - `discover_all_missing_themes()` - Discovery with batch queries and theme filtering (lines 947-1340)
   - Discovery job creation (lines 1302-1318): Assigns theme_name to each ad group item before creating jobs to ensure proper theme tracking; without this field, create_job() falls back to 'singles_day' default
-  - `checkup_ad_groups()` - OPTIMIZED: Direct Google Ads audit (12-24x faster); customer pre-filtering, bulk theme queries, HS/ campaign filter, chunking (500 AG/1000 ads), THEMES_CHECK_DONE tracking with skip_audited parameter (lines 601-921)
+  - `checkup_ad_groups()` - OPTIMIZED: Direct Google Ads audit (12-24x faster) with TRUE VALIDATION; queries ad_group_ad_label to verify theme ads actually exist; only repairs ad groups genuinely missing theme ads; adds THEMES_CHECK_DONE to validated ad groups; removes DONE labels only from invalid cases; customer pre-filtering, bulk theme queries, HS/ campaign filter, chunking (500 AG/1000 ads) (lines 668-1040)
   - `remove_checkup_labels()` - Remove THEMES_CHECK_DONE labels from all ad groups (lines 512-599)
   - `activate_ads_per_plan()` - Original activation function with per-ad-group processing (lines 1525-1906)
   - `activate_ads_per_plan_optimized()` - OPTIMIZED: 5-10x faster activation (lines 1908-2180); parallel customer processing with configurable workers (default: 5), bulk queries for theme-labeled ads and THEMA_ORIGINAL ads, batch status updates (enable theme ads, pause original ads); eliminates per-ad-group operations; uses asyncio.gather for concurrent execution and async locks for thread-safe stats
