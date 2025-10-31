@@ -1977,96 +1977,12 @@ class ThemaAdsService:
 
                 theme_label_name = get_theme_label(required_theme)
 
-                # Step 1: Query all ads with labels in HS/ campaigns, then filter for theme label
-                theme_ads_query = f"""
+                # Step 1: Get all ad groups in HS/ campaigns first
+                ad_groups_query = """
                     SELECT
                         ad_group.id,
                         ad_group.name,
                         ad_group.resource_name,
-                        ad_group_ad.resource_name,
-                        ad_group_ad.status,
-                        campaign.id,
-                        campaign.name,
-                        label.name
-                    FROM ad_group_ad
-                    LEFT JOIN ad_group_ad_label ON ad_group_ad.resource_name = ad_group_ad_label.ad_group_ad
-                    LEFT JOIN label ON ad_group_ad_label.label = label.resource_name
-                    WHERE campaign.name LIKE 'HS/%'
-                    AND campaign.status = 'ENABLED'
-                    AND ad_group.status = 'ENABLED'
-                    AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
-                    AND ad_group_ad.status != REMOVED
-                """
-
-                theme_ads_map = {}  # ad_group_id -> ad info
-                ad_groups_with_theme = set()
-
-                try:
-                    response = ga_service.search(customer_id=customer_id, query=theme_ads_query)
-                    for row in response:
-                        # Filter for ads with the required theme label
-                        if hasattr(row, 'label') and hasattr(row.label, 'name') and row.label.name == theme_label_name:
-                            ag_id = str(row.ad_group.id)
-                            ad_groups_with_theme.add(ag_id)
-                            theme_ads_map[ag_id] = {
-                                'ad_group_id': ag_id,
-                                'ad_group_name': row.ad_group.name,
-                                'ad_group_resource': row.ad_group.resource_name,
-                                'ad_resource': row.ad_group_ad.resource_name,
-                                'ad_status': row.ad_group_ad.status.name,
-                                'campaign_id': str(row.campaign.id),
-                                'campaign_name': row.campaign.name
-                            }
-
-                    logger.info(f"[{customer_id}] Found {len(theme_ads_map)} ad groups with {theme_label_name} ads")
-                except Exception as e:
-                    logger.error(f"[{customer_id}] Failed to query theme ads: {e}")
-                    async with stats_lock:
-                        stats['customers_failed'] += 1
-                        stats['errors'].append(f"{customer_id}: Failed to query theme ads - {e}")
-                    return
-
-                # Step 2: Query all ads with labels in HS/ campaigns, then filter for THEMA_ORIGINAL
-                original_ads_query = f"""
-                    SELECT
-                        ad_group.id,
-                        ad_group_ad.resource_name,
-                        ad_group_ad.status,
-                        label.name
-                    FROM ad_group_ad
-                    LEFT JOIN ad_group_ad_label ON ad_group_ad.resource_name = ad_group_ad_label.ad_group_ad
-                    LEFT JOIN label ON ad_group_ad_label.label = label.resource_name
-                    WHERE campaign.name LIKE 'HS/%'
-                    AND campaign.status = 'ENABLED'
-                    AND ad_group.status = 'ENABLED'
-                    AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
-                    AND ad_group_ad.status != REMOVED
-                """
-
-                original_ads_by_ag = {}  # ad_group_id -> list of ad resources
-
-                try:
-                    response = ga_service.search(customer_id=customer_id, query=original_ads_query)
-                    for row in response:
-                        # Filter for ads with THEMA_ORIGINAL label
-                        if hasattr(row, 'label') and hasattr(row.label, 'name') and row.label.name == 'THEMA_ORIGINAL':
-                            ag_id = str(row.ad_group.id)
-                            if ag_id not in original_ads_by_ag:
-                                original_ads_by_ag[ag_id] = []
-                            original_ads_by_ag[ag_id].append({
-                                'resource': row.ad_group_ad.resource_name,
-                                'status': row.ad_group_ad.status.name
-                            })
-
-                    logger.info(f"[{customer_id}] Found {sum(len(ads) for ads in original_ads_by_ag.values())} THEMA_ORIGINAL ads")
-                except Exception as e:
-                    logger.warning(f"[{customer_id}] Failed to query THEMA_ORIGINAL ads: {e}")
-
-                # Step 3: Check which ad groups are missing theme ads
-                all_ad_groups_query = """
-                    SELECT
-                        ad_group.id,
-                        ad_group.name,
                         campaign.id,
                         campaign.name
                     FROM ad_group
@@ -2075,24 +1991,105 @@ class ThemaAdsService:
                     AND ad_group.status = 'ENABLED'
                 """
 
+                ad_groups_list = []
                 try:
-                    response = ga_service.search(customer_id=customer_id, query=all_ad_groups_query)
+                    response = ga_service.search(customer_id=customer_id, query=ad_groups_query)
+                    for row in response:
+                        ad_groups_list.append({
+                            'id': str(row.ad_group.id),
+                            'name': row.ad_group.name,
+                            'resource': row.ad_group.resource_name,
+                            'campaign_id': str(row.campaign.id),
+                            'campaign_name': row.campaign.name
+                        })
+                    logger.info(f"[{customer_id}] Found {len(ad_groups_list)} ad groups to process")
+                except Exception as e:
+                    logger.error(f"[{customer_id}] Failed to query ad groups: {e}")
+                    async with stats_lock:
+                        stats['customers_failed'] += 1
+                        stats['errors'].append(f"{customer_id}: Failed to query ad groups - {e}")
+                    return
+
+                if not ad_groups_list:
+                    logger.info(f"[{customer_id}] No ad groups found, skipping")
+                    return
+
+                # Step 2: Query all ads with labels for these ad groups (bulk query with LEFT JOIN)
+                ag_resources_str = "', '".join([ag['resource'] for ag in ad_groups_list])
+                all_ads_query = f"""
+                    SELECT
+                        ad_group.id,
+                        ad_group_ad.resource_name,
+                        ad_group_ad.status,
+                        label.name
+                    FROM ad_group_ad
+                    LEFT JOIN ad_group_ad_label ON ad_group_ad.resource_name = ad_group_ad_label.ad_group_ad
+                    LEFT JOIN label ON ad_group_ad_label.label = label.resource_name
+                    WHERE ad_group_ad.ad_group IN ('{ag_resources_str}')
+                    AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+                    AND ad_group_ad.status != REMOVED
+                """
+
+                theme_ads_map = {}  # ad_group_id -> ad info
+                ad_groups_with_theme = set()
+                original_ads_by_ag = {}  # ad_group_id -> list of ad resources
+
+                try:
+                    response = ga_service.search(customer_id=customer_id, query=all_ads_query)
                     for row in response:
                         ag_id = str(row.ad_group.id)
-                        if ag_id not in ad_groups_with_theme:
-                            # Missing theme ad
-                            add_activation_missing_ad(
-                                customer_id=customer_id,
-                                campaign_id=str(row.campaign.id),
-                                campaign_name=row.campaign.name,
-                                ad_group_id=ag_id,
-                                ad_group_name=row.ad_group.name,
-                                required_theme=required_theme
-                            )
-                            async with stats_lock:
-                                stats['ad_groups_missing_theme_ad'] += 1
+                        label_name = row.label.name if hasattr(row, 'label') and hasattr(row.label, 'name') else None
+
+                        # Collect theme ads
+                        if label_name == theme_label_name:
+                            ad_groups_with_theme.add(ag_id)
+                            if ag_id not in theme_ads_map:  # Store first theme ad found per ad group
+                                # Get ad group details from our list
+                                ag_details = next((ag for ag in ad_groups_list if ag['id'] == ag_id), None)
+                                if ag_details:
+                                    theme_ads_map[ag_id] = {
+                                        'ad_group_id': ag_id,
+                                        'ad_group_name': ag_details['name'],
+                                        'ad_group_resource': ag_details['resource'],
+                                        'ad_resource': row.ad_group_ad.resource_name,
+                                        'ad_status': row.ad_group_ad.status.name,
+                                        'campaign_id': ag_details['campaign_id'],
+                                        'campaign_name': ag_details['campaign_name']
+                                    }
+
+                        # Collect THEMA_ORIGINAL ads
+                        if label_name == 'THEMA_ORIGINAL':
+                            if ag_id not in original_ads_by_ag:
+                                original_ads_by_ag[ag_id] = []
+                            original_ads_by_ag[ag_id].append({
+                                'resource': row.ad_group_ad.resource_name,
+                                'status': row.ad_group_ad.status.name
+                            })
+
+                    logger.info(f"[{customer_id}] Found {len(theme_ads_map)} ad groups with {theme_label_name} ads")
+                    logger.info(f"[{customer_id}] Found {sum(len(ads) for ads in original_ads_by_ag.values())} THEMA_ORIGINAL ads")
                 except Exception as e:
-                    logger.warning(f"[{customer_id}] Failed to check for missing theme ads: {e}")
+                    logger.error(f"[{customer_id}] Failed to query ads: {e}")
+                    async with stats_lock:
+                        stats['customers_failed'] += 1
+                        stats['errors'].append(f"{customer_id}: Failed to query ads - {e}")
+                    return
+
+                # Step 3: Check which ad groups are missing theme ads (using ad_groups_list)
+                for ag in ad_groups_list:
+                    ag_id = ag['id']
+                    if ag_id not in ad_groups_with_theme:
+                        # Missing theme ad
+                        add_activation_missing_ad(
+                            customer_id=customer_id,
+                            campaign_id=ag['campaign_id'],
+                            campaign_name=ag['campaign_name'],
+                            ad_group_id=ag_id,
+                            ad_group_name=ag['name'],
+                            required_theme=required_theme
+                        )
+                        async with stats_lock:
+                            stats['ad_groups_missing_theme_ad'] += 1
 
                 # Step 4: Bulk enable all theme ads (that are PAUSED)
                 enable_operations = []
