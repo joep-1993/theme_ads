@@ -1960,6 +1960,7 @@ class ThemaAdsService:
             'ad_groups_activated': 0,
             'ad_groups_already_correct': 0,
             'ad_groups_missing_theme_ad': 0,
+            'ad_groups_skipped_done_label': 0,
             'theme_ads_enabled': 0,
             'original_ads_paused': 0,
             'errors': []
@@ -1976,7 +1977,7 @@ class ThemaAdsService:
 
                 theme_label_name = get_theme_label(required_theme)
 
-                # Step 1: Query all ads with the required theme label in HS/ campaigns
+                # Step 1: Query all ads with labels in HS/ campaigns, then filter for theme label
                 theme_ads_query = f"""
                     SELECT
                         ad_group.id,
@@ -1985,14 +1986,16 @@ class ThemaAdsService:
                         ad_group_ad.resource_name,
                         ad_group_ad.status,
                         campaign.id,
-                        campaign.name
+                        campaign.name,
+                        label.name
                     FROM ad_group_ad
+                    LEFT JOIN ad_group_ad_label ON ad_group_ad.resource_name = ad_group_ad_label.ad_group_ad
+                    LEFT JOIN label ON ad_group_ad_label.label = label.resource_name
                     WHERE campaign.name LIKE 'HS/%'
                     AND campaign.status = 'ENABLED'
                     AND ad_group.status = 'ENABLED'
                     AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
                     AND ad_group_ad.status != REMOVED
-                    AND label.name = '{theme_label_name}'
                 """
 
                 theme_ads_map = {}  # ad_group_id -> ad info
@@ -2001,17 +2004,19 @@ class ThemaAdsService:
                 try:
                     response = ga_service.search(customer_id=customer_id, query=theme_ads_query)
                     for row in response:
-                        ag_id = str(row.ad_group.id)
-                        ad_groups_with_theme.add(ag_id)
-                        theme_ads_map[ag_id] = {
-                            'ad_group_id': ag_id,
-                            'ad_group_name': row.ad_group.name,
-                            'ad_group_resource': row.ad_group.resource_name,
-                            'ad_resource': row.ad_group_ad.resource_name,
-                            'ad_status': row.ad_group_ad.status.name,
-                            'campaign_id': str(row.campaign.id),
-                            'campaign_name': row.campaign.name
-                        }
+                        # Filter for ads with the required theme label
+                        if hasattr(row, 'label') and hasattr(row.label, 'name') and row.label.name == theme_label_name:
+                            ag_id = str(row.ad_group.id)
+                            ad_groups_with_theme.add(ag_id)
+                            theme_ads_map[ag_id] = {
+                                'ad_group_id': ag_id,
+                                'ad_group_name': row.ad_group.name,
+                                'ad_group_resource': row.ad_group.resource_name,
+                                'ad_resource': row.ad_group_ad.resource_name,
+                                'ad_status': row.ad_group_ad.status.name,
+                                'campaign_id': str(row.campaign.id),
+                                'campaign_name': row.campaign.name
+                            }
 
                     logger.info(f"[{customer_id}] Found {len(theme_ads_map)} ad groups with {theme_label_name} ads")
                 except Exception as e:
@@ -2021,19 +2026,21 @@ class ThemaAdsService:
                         stats['errors'].append(f"{customer_id}: Failed to query theme ads - {e}")
                     return
 
-                # Step 2: Query all ads with THEMA_ORIGINAL label in HS/ campaigns
+                # Step 2: Query all ads with labels in HS/ campaigns, then filter for THEMA_ORIGINAL
                 original_ads_query = f"""
                     SELECT
                         ad_group.id,
                         ad_group_ad.resource_name,
-                        ad_group_ad.status
+                        ad_group_ad.status,
+                        label.name
                     FROM ad_group_ad
+                    LEFT JOIN ad_group_ad_label ON ad_group_ad.resource_name = ad_group_ad_label.ad_group_ad
+                    LEFT JOIN label ON ad_group_ad_label.label = label.resource_name
                     WHERE campaign.name LIKE 'HS/%'
                     AND campaign.status = 'ENABLED'
                     AND ad_group.status = 'ENABLED'
                     AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
                     AND ad_group_ad.status != REMOVED
-                    AND label.name = 'THEMA_ORIGINAL'
                 """
 
                 original_ads_by_ag = {}  # ad_group_id -> list of ad resources
@@ -2041,13 +2048,15 @@ class ThemaAdsService:
                 try:
                     response = ga_service.search(customer_id=customer_id, query=original_ads_query)
                     for row in response:
-                        ag_id = str(row.ad_group.id)
-                        if ag_id not in original_ads_by_ag:
-                            original_ads_by_ag[ag_id] = []
-                        original_ads_by_ag[ag_id].append({
-                            'resource': row.ad_group_ad.resource_name,
-                            'status': row.ad_group_ad.status.name
-                        })
+                        # Filter for ads with THEMA_ORIGINAL label
+                        if hasattr(row, 'label') and hasattr(row.label, 'name') and row.label.name == 'THEMA_ORIGINAL':
+                            ag_id = str(row.ad_group.id)
+                            if ag_id not in original_ads_by_ag:
+                                original_ads_by_ag[ag_id] = []
+                            original_ads_by_ag[ag_id].append({
+                                'resource': row.ad_group_ad.resource_name,
+                                'status': row.ad_group_ad.status.name
+                            })
 
                     logger.info(f"[{customer_id}] Found {sum(len(ads) for ads in original_ads_by_ag.values())} THEMA_ORIGINAL ads")
                 except Exception as e:
