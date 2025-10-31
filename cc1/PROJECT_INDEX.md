@@ -19,6 +19,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
   - `/api/thema-ads/checkup` - OPTIMIZED audit of processed ad groups with skip_audited parameter (default: true)
   - `/api/thema-ads/remove-checkup-labels` - Remove THEMES_CHECK_DONE labels for clean audit runs
   - `/api/thema-ads/run-all-themes` - Discovery with theme selection (uses Query(None) for proper repeated param parsing)
+  - `/api/thema-ads/activate-v2` - V2 AD-FIRST ultra-fast activation (10-100x faster); queries FROM ad_group_ad_label to directly target ads by label; two-step label resolution (get label.id by name, query ads by label.id); only 4 queries per customer vs thousands; parameters: customer_ids (optional), parallel_workers (default: 5), reset_labels (default: false)
   - `/api/thema-ads/activate-optimized` - OPTIMIZED activation with parallel processing (lines 1768-1824); processes customers in parallel (default: 5 workers), bulk queries for theme and original ads, batch status updates; parameters: customer_ids (optional), parallel_workers (default: 5), reset_labels (default: false)
   - `/api/thema-ads/queue/status` - Get auto-queue enabled state
   - `/api/thema-ads/queue/enable` - Enable automatic job queue
@@ -30,6 +31,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
   - `remove_checkup_labels()` - Remove THEMES_CHECK_DONE labels from all ad groups (lines 512-599)
   - `activate_ads_per_plan()` - Original activation function with per-ad-group processing (lines 1525-1906)
   - `activate_ads_per_plan_optimized()` - OPTIMIZED: 5-10x faster activation (lines 1908-2180); parallel customer processing with configurable workers (default: 5), bulk queries for theme-labeled ads and THEMA_ORIGINAL ads, batch status updates (enable theme ads, pause original ads); eliminates per-ad-group operations; uses asyncio.gather for concurrent execution and async locks for thread-safe stats
+  - `activate_ads_per_plan_v2()` - V2 AD-FIRST: 10-100x faster activation (lines 2266-2512); revolutionary approach queries FROM ad_group_ad_label instead of ad groups; two-step label resolution gets label.id by name then queries ads directly by label.id; only 4 queries per customer (get theme label ID, query theme ads, get original label ID, query original ads); parallel customer processing with configurable workers; batch mutations (5000 ads per chunk)
   - `get_next_pending_job()` - Returns oldest pending job ID (FIFO)
   - `_start_next_job_if_queue_enabled()` - Auto-queue logic: waits 30s, checks queue state, starts next job
 - `backend/database.py` - Database connection management, auto-queue state persistence
@@ -62,39 +64,45 @@ _Technical reference for the project. Update when: architecture changes, new pat
 ## Key Patterns
 
 ### Performance Optimizations
-1. **Batch API Operations** - Reduce API calls by batching (100 ads per creation batch to prevent crawler overload)
-2. **Async Processing** - Parallel customer processing with semaphore control (5 concurrent customers)
-3. **Prefetch Strategy** - Load all data upfront to eliminate redundant API calls
-4. **Direct Ad Query** - 74% fewer queries using cross-resource filtering
-5. **Customer Account Whitelisting** - Use static file-based customer ID list instead of dynamic MCC query to avoid CANCELED accounts (eliminates permission errors, faster discovery)
-6. **Automatic Job Chunking** - Large discoveries split into optimal-sized jobs (default 50k items/job, configurable 10k-100k)
-7. **API Quota Optimization** - Reduced from 6 to 4 operations per ad group (33% savings):
+1. **Ad-First Query Pattern** - Query ads directly by label instead of querying all ad groups (10-100x faster)
+   - Query FROM ad_group_ad_label WHERE label.id = X
+   - Two-step label resolution: get label.id by name, then query ads by ID
+   - Only 4 queries per customer vs thousands in ad-group-first approach
+   - Eliminates need to query all ad groups and filter client-side
+   - Implementation: activate_ads_per_plan_v2() in backend/thema_ads_service.py:2266-2512
+2. **Batch API Operations** - Reduce API calls by batching (100 ads per creation batch to prevent crawler overload)
+3. **Async Processing** - Parallel customer processing with semaphore control (5 concurrent customers)
+4. **Prefetch Strategy** - Load all data upfront to eliminate redundant API calls
+5. **Direct Ad Query** - 74% fewer queries using cross-resource filtering
+6. **Customer Account Whitelisting** - Use static file-based customer ID list instead of dynamic MCC query to avoid CANCELED accounts (eliminates permission errors, faster discovery)
+7. **Automatic Job Chunking** - Large discoveries split into optimal-sized jobs (default 50k items/job, configurable 10k-100k)
+8. **API Quota Optimization** - Reduced from 6 to 4 operations per ad group (33% savings):
    - Disabled THEMA_AD label on new ads
    - Disabled BF_2025 label on ad groups
    - Kept essential labels: SINGLES_DAY (new ad), THEMA_ORIGINAL (old ad), SD_DONE (ad group)
-8. **Google Crawler Rate Limiting Prevention** - Small batches to prevent DESTINATION_NOT_WORKING errors:
+9. **Google Crawler Rate Limiting Prevention** - Small batches to prevent DESTINATION_NOT_WORKING errors:
    - Ad creation batch size: 100 (down from 10,000)
    - Batch delays: 5s between ad creation batches
    - Prevents CloudFront from blocking Google's policy crawler
-9. **Rate Limiting** - Multi-layer approach to prevent 503 errors:
+10. **Rate Limiting** - Multi-layer approach to prevent 503 errors:
    - Query batch size: 5000 (reduced from 7500)
    - Customer delays: 30s between customers
    - Batch delays: 2s between API queries
    - Concurrency: 5 max concurrent customers (reduced from 10)
    - Job chunking: 50k items per job max
    - Operation reduction: 4 ops/ad group (from 6)
-10. **Extended 503 Retry Logic** - Exponential backoff with long waits (60s, 180s, 540s, 1620s) for Service Unavailable errors
-11. **CONCURRENT_MODIFICATION Retry Handling** - Jittered exponential backoff (5s→80s with ±20% variance)
+11. **Extended 503 Retry Logic** - Exponential backoff with long waits (60s, 180s, 540s, 1620s) for Service Unavailable errors
+12. **CONCURRENT_MODIFICATION Retry Handling** - Jittered exponential backoff (5s→80s with ±20% variance)
    - Detects database_error: CONCURRENT_MODIFICATION specifically
    - Prevents thundering herd with random delays to avoid simultaneous retries
    - Eliminated 40/97 failures in Job 338 (41% failure rate → 0%)
    - Longer base delays (5s, 10s, 20s, 40s, 80s) vs standard (2s, 4s, 8s)
-12. **Batch Query Discovery Optimization** - Eliminate N+1 queries in discovery (99.9% reduction)
+13. **Batch Query Discovery Optimization** - Eliminate N+1 queries in discovery (99.9% reduction)
    - Batch fetch ad group labels, ads, and ad labels using IN clauses (5000 per batch)
    - Use dictionary lookups for O(1) resource→ID mapping instead of O(n) linear search
    - Reduced 50,000 queries to ~30 queries in all-themes discovery
    - Discovery time: 8+ hours → 5-10 minutes for 10,000 ad groups (99x faster)
-13. **Duplicate Ad Removal with Batch Optimization** - 50x performance improvement for duplicate detection
+14. **Duplicate Ad Removal with Batch Optimization** - 50x performance improvement for duplicate detection
    - Content-based duplicate detection: sorted(headlines+descriptions) signature for uniqueness
    - Priority scoring: theme_label_count * 100 + has_any_theme * 10 + is_enabled * 1
    - Python stable sort for deterministic tie-breaking (older ads preferred)
@@ -102,7 +110,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
    - DUPLICATES_CHECKED label prevents reprocessing
    - Performance: 90 seconds vs 60+ minutes for 67,719 ads
    - Two-step GAQL: Fetch label resources with IN clause → Fetch label names → Map in code
-14. **Parallel Duplicate Removal** - 60% time reduction using multi-processing
+15. **Parallel Duplicate Removal** - 60% time reduction using multi-processing
    - ProcessPoolExecutor with 3 concurrent workers (one per customer)
    - Each customer has separate Google Ads API rate limits (safe to parallelize)
    - Automatic resume from DUPLICATES_CHECKED labels after interruptions

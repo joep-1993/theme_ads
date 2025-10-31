@@ -2332,18 +2332,18 @@ class ThemaAdsService:
 
                 theme_label_name = get_theme_label(required_theme)
 
-                # Step 0: Get the label resource name for the theme label
+                # Step 0: Get the label ID for the theme label
                 label_query = f"""
-                    SELECT label.resource_name
+                    SELECT label.id, label.resource_name
                     FROM label
                     WHERE label.name = '{theme_label_name}'
                 """
 
-                theme_label_resource = None
+                theme_label_id = None
                 try:
                     response = ga_service.search(customer_id=customer_id, query=label_query)
                     for row in response:
-                        theme_label_resource = row.label.resource_name
+                        theme_label_id = row.label.id
                         break
                 except Exception as e:
                     logger.error(f"[{customer_id}] Failed to find label {theme_label_name}: {e}")
@@ -2352,25 +2352,25 @@ class ThemaAdsService:
                         stats['errors'].append(f"{customer_id}: Label {theme_label_name} not found - {e}")
                     return
 
-                if not theme_label_resource:
+                if not theme_label_id:
                     logger.info(f"[{customer_id}] Label {theme_label_name} does not exist")
                     async with stats_lock:
                         stats['customers_processed'] += 1
                     return
 
-                # Step 1: Direct query for ALL theme ads in HS/ campaigns
-                # This is the KEY optimization - query ads by label resource directly!
+                # Step 1: Direct query for ALL theme ads by querying FROM ad_group_ad_label
+                # This is the KEY optimization - query FROM the label relationship!
                 theme_ads_query = f"""
                     SELECT
                         ad_group_ad.ad_group,
                         ad_group_ad.resource_name,
                         ad_group_ad.status,
                         campaign.name
-                    FROM ad_group_ad
+                    FROM ad_group_ad_label
                     WHERE campaign.name LIKE 'HS/%'
                     AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
                     AND ad_group_ad.status != REMOVED
-                    AND ad_group_ad_label.label = '{theme_label_resource}'
+                    AND label.id = {theme_label_id}
                 """
 
                 # Organize theme ads by ad group
@@ -2404,36 +2404,36 @@ class ThemaAdsService:
                         stats['customers_processed'] += 1
                     return
 
-                # Step 2: Get THEMA_ORIGINAL label resource name
+                # Step 2: Get THEMA_ORIGINAL label ID
                 original_label_query = """
-                    SELECT label.resource_name
+                    SELECT label.id
                     FROM label
                     WHERE label.name = 'THEMA_ORIGINAL'
                 """
 
-                original_label_resource = None
+                original_label_id = None
                 try:
                     response = ga_service.search(customer_id=customer_id, query=original_label_query)
                     for row in response:
-                        original_label_resource = row.label.resource_name
+                        original_label_id = row.label.id
                         break
                 except Exception as e:
                     logger.warning(f"[{customer_id}] THEMA_ORIGINAL label not found: {e}")
 
-                # Step 3: Query THEMA_ORIGINAL ads in those same ad groups
+                # Step 3: Query THEMA_ORIGINAL ads in those same ad groups using FROM ad_group_ad_label
                 original_ads_by_ag = {}  # ad_group_resource -> [ad_resources]
-                if original_label_resource:
+                if original_label_id:
                     ag_resources_str = "', '".join(ad_groups_with_theme)
                     original_ads_query = f"""
                         SELECT
                             ad_group_ad.ad_group,
                             ad_group_ad.resource_name,
                             ad_group_ad.status
-                        FROM ad_group_ad
+                        FROM ad_group_ad_label
                         WHERE ad_group_ad.ad_group IN ('{ag_resources_str}')
                         AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
                         AND ad_group_ad.status != REMOVED
-                        AND ad_group_ad_label.label = '{original_label_resource}'
+                        AND label.id = {original_label_id}
                     """
 
                     try:

@@ -35,6 +35,78 @@ docker exec theme_ads-db-1 psql -U postgres -d thema_ads -c \
   "SELECT COUNT(*) FROM thema_ads_job_items WHERE job_id = {job_id};"
 ```
 
+## GAQL Query Optimization Patterns
+
+### Ad-First Query Pattern for Maximum Performance (2025-10-31)
+**Revolutionary discovery**: Query ads directly by label instead of querying all ad groups first.
+
+**Performance improvement**: 10-100x faster activation
+- Old approach: Query 10,000 ad groups → filter → query ads → query labels (thousands of queries)
+- New approach: Query ~1,000 theme ads → query ~2,000 original ads (only 4 queries per customer!)
+
+**The key insight**: Query FROM `ad_group_ad_label` instead of FROM `ad_group_ad`
+```gaql
+-- CORRECT (fast): Query FROM the label relationship
+SELECT ad_group_ad.ad_group, ad_group_ad.resource_name, ad_group_ad.status
+FROM ad_group_ad_label
+WHERE label.id = 123456
+AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+
+-- WRONG (slow): Query FROM ad_group_ad and try to filter by label
+SELECT ad_group_ad.ad_group, ad_group_ad.resource_name
+FROM ad_group_ad
+WHERE ad_group_ad_label.label = ...  -- ERROR: PROHIBITED_RESOURCE_TYPE_IN_WHERE_CLAUSE
+```
+
+**Two-step label resolution pattern**:
+```python
+# Step 1: Get label ID by name
+label_query = "SELECT label.id FROM label WHERE label.name = 'THEME_BF'"
+label_id = execute_query(label_query)[0].label.id
+
+# Step 2: Query ads directly by label ID
+ads_query = f"""
+    SELECT ad_group_ad.resource_name, ad_group_ad.status
+    FROM ad_group_ad_label
+    WHERE label.id = {label_id}
+"""
+ads = execute_query(ads_query)
+```
+
+**Why this works**:
+- `ad_group_ad_label` is a JOIN table connecting ads to labels
+- Querying FROM this table lets you filter by `label.id` directly
+- Eliminates need to query all ad groups and filter client-side
+- Documentation: https://developers.google.com/google-ads/api/fields/v22/ad_group_ad_label
+
+**Implementation**: backend/thema_ads_service.py:2266-2512 (`activate_ads_per_plan_v2`)
+
+### GAQL Limitations and Workarounds (2025-10-31)
+**Critical limitations discovered through trial and error**:
+
+1. **Cannot filter by label.name in ad_group_ad_label queries**
+   - ERROR: `PROHIBITED_RESOURCE_TYPE_IN_SELECT_CLAUSE` when trying `SELECT label.name FROM ad_group_ad_label`
+   - Workaround: Use `label.id` instead; resolve label name → ID separately
+
+2. **Cannot use subqueries in WHERE/IN clauses**
+   - ERROR: `BAD_VALUE` when trying `WHERE label IN (SELECT label.resource_name FROM label WHERE label.name = 'X')`
+   - Workaround: Two-step approach (query label separately, then use ID in main query)
+
+3. **Cannot filter by ad_group_ad_label when querying FROM ad_group_ad**
+   - ERROR: `PROHIBITED_RESOURCE_TYPE_IN_WHERE_CLAUSE`
+   - Workaround: Query FROM ad_group_ad_label instead of FROM ad_group_ad
+
+4. **LEFT JOIN syntax unreliable**
+   - Attempted: `LEFT JOIN ad_group_ad_label` in ad_group queries
+   - Result: Inconsistent behavior, empty results
+   - Workaround: Use FROM ad_group_ad_label (INNER JOIN behavior) for label-filtered queries
+
+5. **No OR operator support in complex WHERE clauses**
+   - Limitation: Cannot do `WHERE (label.name = 'X' OR label.name = 'Y')`
+   - Workaround: Use IN operator with label IDs: `WHERE label.id IN (123, 456)`
+
+**Key takeaway**: GAQL is NOT SQL. It's a restricted subset with specific patterns that work. Always query FROM the relationship table when filtering by relationships (e.g., FROM ad_group_ad_label to filter by labels).
+
 ## Common Issues & Solutions
 
 ### Singles Day Jobs Created Despite Theme Not Selected (2025-10-24)
