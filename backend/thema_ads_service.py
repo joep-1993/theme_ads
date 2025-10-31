@@ -1968,7 +1968,7 @@ class ThemaAdsService:
         stats_lock = asyncio.Lock()
 
         async def process_customer(customer_id: str, required_theme: str):
-            """Process a single customer with bulk operations."""
+            """Process a single customer - uses same logic as original activate_ads_per_plan."""
             try:
                 logger.info(f"[{customer_id}] Processing - required theme: {required_theme}")
 
@@ -1977,7 +1977,7 @@ class ThemaAdsService:
 
                 theme_label_name = get_theme_label(required_theme)
 
-                # Step 1: Get all ad groups in HS/ campaigns first
+                # Step 1: Get all ad groups in HS/ campaigns
                 ad_groups_query = """
                     SELECT
                         ad_group.id,
@@ -1987,8 +1987,8 @@ class ThemaAdsService:
                         campaign.name
                     FROM ad_group
                     WHERE campaign.name LIKE 'HS/%'
-                    AND campaign.status = 'ENABLED'
                     AND ad_group.status = 'ENABLED'
+                    AND campaign.status = 'ENABLED'
                 """
 
                 ad_groups_list = []
@@ -2002,7 +2002,7 @@ class ThemaAdsService:
                             'campaign_id': str(row.campaign.id),
                             'campaign_name': row.campaign.name
                         })
-                    logger.info(f"[{customer_id}] Found {len(ad_groups_list)} ad groups to process")
+                    logger.info(f"[{customer_id}] Found {len(ad_groups_list)} ad groups")
                 except Exception as e:
                     logger.error(f"[{customer_id}] Failed to query ad groups: {e}")
                     async with stats_lock:
@@ -2011,16 +2011,19 @@ class ThemaAdsService:
                     return
 
                 if not ad_groups_list:
-                    logger.info(f"[{customer_id}] No ad groups found, skipping")
+                    logger.info(f"[{customer_id}] No ad groups found")
+                    async with stats_lock:
+                        stats['customers_processed'] += 1
                     return
 
-                # Step 2: Query all ads with labels for these ad groups (bulk query with LEFT JOIN)
+                # Step 2: Batch query all ads with labels (using IN clause with LEFT JOIN)
                 ag_resources_str = "', '".join([ag['resource'] for ag in ad_groups_list])
-                all_ads_query = f"""
+                batch_ads_query = f"""
                     SELECT
-                        ad_group.id,
-                        ad_group_ad.resource_name,
+                        ad_group_ad.ad_group,
+                        ad_group_ad.ad.id,
                         ad_group_ad.status,
+                        ad_group_ad.resource_name,
                         label.name
                     FROM ad_group_ad
                     LEFT JOIN ad_group_ad_label ON ad_group_ad.resource_name = ad_group_ad_label.ad_group_ad
@@ -2030,55 +2033,79 @@ class ThemaAdsService:
                     AND ad_group_ad.status != REMOVED
                 """
 
-                theme_ads_map = {}  # ad_group_id -> ad info
-                ad_groups_with_theme = set()
-                original_ads_by_ag = {}  # ad_group_id -> list of ad resources
-
+                # Organize ads by ad group and label
+                ads_by_ag = {}  # ad_group_resource -> {labels, ads}
                 try:
-                    response = ga_service.search(customer_id=customer_id, query=all_ads_query)
+                    response = ga_service.search(customer_id=customer_id, query=batch_ads_query)
                     for row in response:
-                        ag_id = str(row.ad_group.id)
-                        label_name = row.label.name if hasattr(row, 'label') and hasattr(row.label, 'name') else None
+                        ag_res = row.ad_group_ad.ad_group
+                        if ag_res not in ads_by_ag:
+                            ads_by_ag[ag_res] = {'ads': [], 'labels': set()}
 
-                        # Collect theme ads
-                        if label_name == theme_label_name:
-                            ad_groups_with_theme.add(ag_id)
-                            if ag_id not in theme_ads_map:  # Store first theme ad found per ad group
-                                # Get ad group details from our list
-                                ag_details = next((ag for ag in ad_groups_list if ag['id'] == ag_id), None)
-                                if ag_details:
-                                    theme_ads_map[ag_id] = {
-                                        'ad_group_id': ag_id,
-                                        'ad_group_name': ag_details['name'],
-                                        'ad_group_resource': ag_details['resource'],
-                                        'ad_resource': row.ad_group_ad.resource_name,
-                                        'ad_status': row.ad_group_ad.status.name,
-                                        'campaign_id': ag_details['campaign_id'],
-                                        'campaign_name': ag_details['campaign_name']
-                                    }
+                        ad_info = {
+                            'resource': row.ad_group_ad.resource_name,
+                            'status': row.ad_group_ad.status.name,
+                            'labels': set()
+                        }
+                        if hasattr(row, 'label') and hasattr(row.label, 'name'):
+                            ad_info['labels'].add(row.label.name)
 
-                        # Collect THEMA_ORIGINAL ads
-                        if label_name == 'THEMA_ORIGINAL':
-                            if ag_id not in original_ads_by_ag:
-                                original_ads_by_ag[ag_id] = []
-                            original_ads_by_ag[ag_id].append({
-                                'resource': row.ad_group_ad.resource_name,
-                                'status': row.ad_group_ad.status.name
-                            })
+                        ads_by_ag[ag_res]['ads'].append(ad_info)
+                        if hasattr(row, 'label') and hasattr(row.label, 'name'):
+                            ads_by_ag[ag_res]['labels'].add(row.label.name)
 
-                    logger.info(f"[{customer_id}] Found {len(theme_ads_map)} ad groups with {theme_label_name} ads")
-                    logger.info(f"[{customer_id}] Found {sum(len(ads) for ads in original_ads_by_ag.values())} THEMA_ORIGINAL ads")
+                    logger.info(f"[{customer_id}] Queried ads for {len(ads_by_ag)} ad groups")
                 except Exception as e:
-                    logger.error(f"[{customer_id}] Failed to query ads: {e}")
+                    logger.error(f"[{customer_id}] Failed to batch query ads: {e}")
                     async with stats_lock:
                         stats['customers_failed'] += 1
-                        stats['errors'].append(f"{customer_id}: Failed to query ads - {e}")
+                        stats['errors'].append(f"{customer_id}: Failed to batch query ads - {e}")
                     return
 
-                # Step 3: Check which ad groups are missing theme ads (using ad_groups_list)
+                # Step 3: Process each ad group
+                enable_operations = []
+                pause_operations = []
+
                 for ag in ad_groups_list:
+                    ag_res = ag['resource']
                     ag_id = ag['id']
-                    if ag_id not in ad_groups_with_theme:
+                    ag_ads = ads_by_ag.get(ag_res, {'ads': [], 'labels': set()})
+
+                    async with stats_lock:
+                        stats['ad_groups_checked'] += 1
+
+                    # Find theme ad and THEMA_ORIGINAL ads
+                    theme_ad = None
+                    original_ads = []
+                    for ad in ag_ads['ads']:
+                        if theme_label_name in ad['labels']:
+                            theme_ad = ad
+                        if 'THEMA_ORIGINAL' in ad['labels']:
+                            original_ads.append(ad)
+
+                    if theme_ad:
+                        # Enable theme ad if paused
+                        if theme_ad['status'] == 'PAUSED':
+                            operation = client.get_type("AdGroupAdOperation")
+                            ad_group_ad = operation.update
+                            ad_group_ad.resource_name = theme_ad['resource']
+                            ad_group_ad.status = client.enums.AdGroupAdStatusEnum.ENABLED
+                            operation.update_mask.paths.append('status')
+                            enable_operations.append(operation)
+
+                        # Pause all THEMA_ORIGINAL ads
+                        for orig_ad in original_ads:
+                            if orig_ad['status'] == 'ENABLED':
+                                operation = client.get_type("AdGroupAdOperation")
+                                ad_group_ad = operation.update
+                                ad_group_ad.resource_name = orig_ad['resource']
+                                ad_group_ad.status = client.enums.AdGroupAdStatusEnum.PAUSED
+                                operation.update_mask.paths.append('status')
+                                pause_operations.append(operation)
+
+                        async with stats_lock:
+                            stats['ad_groups_activated'] += 1
+                    else:
                         # Missing theme ad
                         add_activation_missing_ad(
                             customer_id=customer_id,
@@ -2091,20 +2118,9 @@ class ThemaAdsService:
                         async with stats_lock:
                             stats['ad_groups_missing_theme_ad'] += 1
 
-                # Step 4: Bulk enable all theme ads (that are PAUSED)
-                enable_operations = []
-                for ag_id, ad_info in theme_ads_map.items():
-                    if ad_info['ad_status'] == 'PAUSED':
-                        operation = client.get_type("AdGroupAdOperation")
-                        ad_group_ad = operation.update
-                        ad_group_ad.resource_name = ad_info['ad_resource']
-                        ad_group_ad.status = client.enums.AdGroupAdStatusEnum.ENABLED
-                        operation.update_mask.paths.append('status')
-                        enable_operations.append(operation)
-
+                # Step 4: Execute batch mutations
                 if enable_operations:
                     try:
-                        # Batch in chunks of 5000 to avoid API limits
                         chunk_size = 5000
                         for i in range(0, len(enable_operations), chunk_size):
                             chunk = enable_operations[i:i+chunk_size]
@@ -2112,33 +2128,16 @@ class ThemaAdsService:
                                 customer_id=customer_id,
                                 operations=chunk
                             )
-
                         logger.info(f"[{customer_id}] Enabled {len(enable_operations)} theme ads")
                         async with stats_lock:
                             stats['theme_ads_enabled'] += len(enable_operations)
-                            stats['ad_groups_activated'] += len(enable_operations)
                     except Exception as e:
                         logger.error(f"[{customer_id}] Failed to enable theme ads: {e}")
                         async with stats_lock:
                             stats['errors'].append(f"{customer_id}: Failed to enable theme ads - {e}")
 
-                # Step 5: Bulk pause all THEMA_ORIGINAL ads (that are ENABLED)
-                pause_operations = []
-                for ag_id, ads_list in original_ads_by_ag.items():
-                    # Only pause if this ad group has a theme ad to activate
-                    if ag_id in ad_groups_with_theme:
-                        for ad in ads_list:
-                            if ad['status'] == 'ENABLED':
-                                operation = client.get_type("AdGroupAdOperation")
-                                ad_group_ad = operation.update
-                                ad_group_ad.resource_name = ad['resource']
-                                ad_group_ad.status = client.enums.AdGroupAdStatusEnum.PAUSED
-                                operation.update_mask.paths.append('status')
-                                pause_operations.append(operation)
-
                 if pause_operations:
                     try:
-                        # Batch in chunks of 5000 to avoid API limits
                         chunk_size = 5000
                         for i in range(0, len(pause_operations), chunk_size):
                             chunk = pause_operations[i:i+chunk_size]
@@ -2146,7 +2145,6 @@ class ThemaAdsService:
                                 customer_id=customer_id,
                                 operations=chunk
                             )
-
                         logger.info(f"[{customer_id}] Paused {len(pause_operations)} THEMA_ORIGINAL ads")
                         async with stats_lock:
                             stats['original_ads_paused'] += len(pause_operations)
@@ -2157,7 +2155,6 @@ class ThemaAdsService:
 
                 async with stats_lock:
                     stats['customers_processed'] += 1
-                    stats['ad_groups_checked'] += len(ad_groups_with_theme)
 
                 logger.info(f"[{customer_id}] Completed successfully")
 
