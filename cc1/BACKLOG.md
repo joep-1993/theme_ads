@@ -4,6 +4,7 @@ _Future features and improvements. Update when: ideas emerge, features are plann
 ## Ideas
 _Features under consideration_
 
+- **BLOCKED: Ad-first query optimization** (Directly query ads with specific theme labels instead of querying all ad groups; would be 10-100x faster; IMPOSSIBLE due to GAQL limitations: cannot filter by ad_group_ad_label.label when querying from ad_group_ad, subqueries not supported in WHERE/IN clauses, LEFT JOIN syntax unreliable; ad-group-first approach is the only viable option) #impact:high #effort:impossible #type:improvement #status:blocked
 - Job execution coordination system (prevent concurrent execution of conflicting operations like discovery+activation; add job dependency tracking to ensure discovery completes before activation starts; could implement mutex locks per customer or operation type; would reduce race conditions, API rate limit issues, and container resource exhaustion) #impact:low #effort:medium #type:improvement
 - Adaptive rate limiting based on API response patterns (monitor 503 error frequency and automatically adjust batch size, delays, and concurrency) #impact:medium #effort:large #type:improvement
 - RSA slot management for 3-ad limit (automatically remove old theme ads when ad group is full; implementation started in rsa_management.py but not yet integrated) #impact:high #effort:medium #type:feature

@@ -1824,6 +1824,65 @@ async def activate_ads_optimized(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/thema-ads/activate-v2")
+async def activate_ads_v2_endpoint(
+    customer_ids: List[str] = None,
+    reset_labels: bool = False,
+    parallel_workers: int = 5
+):
+    """
+    V2: Ultra-fast AD-FIRST activation approach.
+
+    Directly queries ads by label instead of querying all ad groups first.
+    This is 10-100x faster than the ad-group-first approach.
+
+    Performance: Queries only the exact ads needed (theme + original labeled ads)
+    instead of scanning all ad groups and filtering.
+
+    Args:
+        customer_ids: Optional list of customer IDs to process (None = all in plan)
+        reset_labels: If True, reprocess ad groups with ACTIVATION_DONE label
+        parallel_workers: Number of customers to process in parallel (default: 5)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"V2 (AD-FIRST) Activate ads parameters: customer_ids={customer_ids}, parallel={parallel_workers}, reset={reset_labels}")
+
+    try:
+        from pathlib import Path
+        from dotenv import load_dotenv
+
+        # Load environment variables
+        env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+        else:
+            raise HTTPException(status_code=500, detail="Google Ads credentials not configured")
+
+        from config import load_config_from_env
+        from google_ads_client import initialize_client
+
+        config = load_config_from_env()
+        client = initialize_client(config.google_ads)
+
+        # Run V2 activation (integrated into thema_ads_service)
+        result = await thema_ads_service.activate_ads_per_plan_v2(
+            client=client,
+            customer_ids=customer_ids,
+            parallel_workers=parallel_workers,
+            reset_labels=reset_labels
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"V2 (AD-FIRST) ad activation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/thema-ads/activation-plan")
 async def get_activation_plan_api(customer_ids: List[str] = None):
     """Get the current activation plan."""
