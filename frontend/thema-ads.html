@@ -46,6 +46,9 @@
                             <li class="nav-item">
                                 <a class="nav-link text-white" id="activate-ads-tab" data-bs-toggle="tab" href="#activateAds" role="tab">Activate Ads</a>
                             </li>
+                            <li class="nav-item">
+                                <a class="nav-link text-white" id="remove-duplicates-tab" data-bs-toggle="tab" href="#removeDuplicates" role="tab">Remove Duplicates</a>
+                            </li>
                         </ul>
                     </div>
                     <div class="card-body">
@@ -382,6 +385,68 @@
                                                 </tbody>
                                             </table>
                                         </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Remove Duplicates Tab -->
+                            <div class="tab-pane fade" id="removeDuplicates" role="tabpanel">
+                                <h6>Remove Duplicates - Clean Up Duplicate Ads</h6>
+                                <p class="text-muted">
+                                    Find and remove duplicate ads from HS/ campaigns:<br>
+                                    <small>
+                                        • Finds ads with identical content (same headlines + descriptions)<br>
+                                        • Keeps ads with theme labels (THEME_BF, THEME_SK, etc.)<br>
+                                        • Removes duplicate ads without theme labels<br>
+                                        • Labels processed ad groups with <code>THEME_DUPLICATES_CHECK</code> to prevent reprocessing<br>
+                                        • <strong>Safe operation:</strong> dry-run mode by default (preview changes first)
+                                    </small>
+                                </p>
+
+                                <div class="card mb-3">
+                                    <div class="card-header">
+                                        <strong>Remove Duplicates Configuration</strong>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="mb-3">
+                                            <label for="duplicateCustomerFilter" class="form-label">Customer Filter</label>
+                                            <select class="form-select" id="duplicateCustomerFilter" style="max-width: 300px;">
+                                                <option value="beslist">Beslist.nl accounts only</option>
+                                                <option value="all">All customers</option>
+                                                <option value="single">Single customer</option>
+                                            </select>
+                                        </div>
+
+                                        <div class="mb-3" id="duplicateSingleCustomerDiv" style="display: none;">
+                                            <label for="duplicateSingleCustomer" class="form-label">Customer ID</label>
+                                            <input type="text" class="form-control" id="duplicateSingleCustomer" placeholder="Enter customer ID" style="max-width: 300px;">
+                                        </div>
+
+                                        <div class="mb-3">
+                                            <label for="duplicateLimit" class="form-label">Limit (optional)</label>
+                                            <input type="number" class="form-control" id="duplicateLimit" placeholder="Leave empty for no limit" style="max-width: 200px;">
+                                            <small class="text-muted">Limit ad groups per customer (for testing)</small>
+                                        </div>
+
+                                        <div class="form-check mb-3">
+                                            <input class="form-check-input" type="checkbox" id="duplicateDryRun" checked>
+                                            <label class="form-check-label" for="duplicateDryRun">
+                                                <strong>Dry Run (Preview Only)</strong>
+                                            </label>
+                                            <small class="text-muted d-block">Check this to see what would be removed without actually removing anything. <strong>Uncheck to actually remove duplicates.</strong></small>
+                                        </div>
+
+                                        <div class="form-check mb-3">
+                                            <input class="form-check-input" type="checkbox" id="duplicateResetLabels">
+                                            <label class="form-check-label" for="duplicateResetLabels">
+                                                Reset labels (recheck ad groups with THEME_DUPLICATES_CHECK label)
+                                            </label>
+                                        </div>
+
+                                        <button class="btn btn-warning" onclick="removeDuplicates()" id="removeDuplicatesBtn">
+                                            <i class="bi bi-trash"></i> Find & Remove Duplicates
+                                        </button>
+                                        <div id="removeDuplicatesResult" class="mt-3"></div>
                                     </div>
                                 </div>
                             </div>

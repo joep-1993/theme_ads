@@ -935,3 +935,114 @@ async function runAllThemes() {
         btn.disabled = false;
     }
 }
+
+// Remove Duplicates function
+async function removeDuplicates() {
+    const customerFilter = document.getElementById('duplicateCustomerFilter').value;
+    const singleCustomer = document.getElementById('duplicateSingleCustomer').value.trim();
+    const limit = document.getElementById('duplicateLimit').value;
+    const dryRun = document.getElementById('duplicateDryRun').checked;
+    const resetLabels = document.getElementById('duplicateResetLabels').checked;
+    const resultDiv = document.getElementById('removeDuplicatesResult');
+    const btn = document.getElementById('removeDuplicatesBtn');
+
+    // Validate single customer input if needed
+    if (customerFilter === 'single' && !singleCustomer) {
+        resultDiv.innerHTML = '<div class="alert alert-danger">Please enter a customer ID</div>';
+        return;
+    }
+
+    btn.disabled = true;
+
+    const modeText = dryRun ? '(DRY RUN - Preview Only)' : '(LIVE - Will Remove Ads)';
+    const modeClass = dryRun ? 'alert-info' : 'alert-warning';
+
+    resultDiv.innerHTML = `
+        <div class="alert ${modeClass}">
+            <strong>Finding duplicate ads ${modeText}</strong><br>
+            Scanning ad groups for duplicate content...<br>
+            This may take a few minutes depending on the number of ad groups.<br>
+            Please wait...
+        </div>
+    `;
+
+    try {
+        // Build query parameters
+        const params = new URLSearchParams();
+        params.append('dry_run', dryRun);
+        params.append('reset_labels', resetLabels);
+
+        if (limit) {
+            params.append('limit', limit);
+        }
+
+        // Handle customer IDs based on filter
+        let customerIds = null;
+        if (customerFilter === 'single') {
+            customerIds = [singleCustomer];
+        } else if (customerFilter === 'beslist') {
+            // Backend will use default Beslist.nl customers
+            customerIds = null;
+        } else {
+            // all - backend will get all customers
+            customerIds = null;
+        }
+
+        if (customerIds) {
+            customerIds.forEach(id => params.append('customer_ids', id));
+        }
+
+        const response = await fetch(`/api/thema-ads/remove-duplicates?${params.toString()}`, {
+            method: 'POST'
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.status === 'completed') {
+            const stats = data.stats;
+            const isDryRun = data.dry_run;
+
+            let resultHTML = `<div class="alert ${isDryRun ? 'alert-info' : 'alert-success'}">`;
+            resultHTML += `<h5>${isDryRun ? 'Duplicate Analysis Completed (DRY RUN)' : 'Duplicate Removal Completed!'}</h5>`;
+            resultHTML += '<hr>';
+            resultHTML += `<strong>Customers Processed:</strong> ${stats.customers_processed}<br>`;
+            resultHTML += `<strong>Ad Groups Checked:</strong> ${stats.ad_groups_checked}<br>`;
+            resultHTML += `<strong>Ad Groups with Duplicates:</strong> ${stats.ad_groups_with_duplicates}<br>`;
+            resultHTML += `<strong>Duplicate Sets Found:</strong> ${stats.duplicate_sets_found}<br>`;
+            resultHTML += `<strong>Ads ${isDryRun ? 'That Would Be Removed' : 'Removed'}:</strong> ${stats.ads_removed}<br>`;
+
+            if (isDryRun) {
+                resultHTML += '<hr>';
+                resultHTML += '<div class="alert alert-warning mb-0">';
+                resultHTML += '<strong>This was a DRY RUN.</strong> No ads were actually removed.<br>';
+                resultHTML += 'Uncheck "Dry Run" and run again to actually remove the duplicate ads.';
+                resultHTML += '</div>';
+            } else {
+                resultHTML += '<hr>';
+                resultHTML += '<div class="alert alert-success mb-0">';
+                resultHTML += `<strong>Successfully removed ${stats.ads_removed} duplicate ads!</strong><br>`;
+                resultHTML += `Labeled ${stats.ad_groups_with_duplicates} ad groups with THEME_DUPLICATES_CHECK to prevent reprocessing.`;
+                resultHTML += '</div>';
+            }
+
+            resultHTML += '</div>';
+            resultDiv.innerHTML = resultHTML;
+        } else {
+            resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${data.detail || 'Unknown error'}</div>`;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+// Event listener for duplicate customer filter
+document.getElementById('duplicateCustomerFilter')?.addEventListener('change', function() {
+    const singleCustomerDiv = document.getElementById('duplicateSingleCustomerDiv');
+    if (this.value === 'single') {
+        singleCustomerDiv.style.display = 'block';
+    } else {
+        singleCustomerDiv.style.display = 'none';
+    }
+});

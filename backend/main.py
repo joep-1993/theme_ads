@@ -1883,6 +1883,65 @@ async def activate_ads_v2_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/thema-ads/remove-duplicates")
+async def remove_duplicates_endpoint(
+    customer_ids: List[str] = None,
+    limit: int = None,
+    dry_run: bool = True,
+    reset_labels: bool = False
+):
+    """
+    Remove duplicate ads from ad groups in HS/ campaigns.
+
+    Finds ads with identical content (headlines + descriptions) and removes
+    duplicates, keeping ads with theme labels.
+
+    Args:
+        customer_ids: Optional list of customer IDs (None = all Beslist.nl)
+        limit: Optional limit of ad groups per customer (for testing)
+        dry_run: If True, only report what would be done (default: True)
+        reset_labels: If True, recheck ad groups with THEME_DUPLICATES_CHECK label
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"Remove duplicates parameters: customer_ids={customer_ids}, limit={limit}, dry_run={dry_run}, reset={reset_labels}")
+
+    try:
+        from pathlib import Path
+        from dotenv import load_dotenv
+
+        # Load environment variables
+        env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+        else:
+            raise HTTPException(status_code=500, detail="Google Ads credentials not configured")
+
+        from config import load_config_from_env
+        from google_ads_client import initialize_client
+
+        config = load_config_from_env()
+        client = initialize_client(config.google_ads)
+
+        # Run duplicate removal
+        result = await thema_ads_service.remove_duplicates_all_customers(
+            client=client,
+            customer_ids=customer_ids,
+            limit=limit,
+            dry_run=dry_run,
+            reset_labels=reset_labels
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Duplicate removal failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/thema-ads/activation-plan")
 async def get_activation_plan_api(customer_ids: List[str] = None):
     """Get the current activation plan."""
