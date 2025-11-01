@@ -1913,7 +1913,7 @@ async def activate_ads_optimized(
 
 @app.post("/api/thema-ads/activate-v2")
 async def activate_ads_v2_endpoint(
-    customer_ids: List[str] = None,
+    customer_ids: List[str] = Query(None),
     reset_labels: bool = False,
     parallel_workers: int = 5
 ):
