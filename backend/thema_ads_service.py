@@ -2336,23 +2336,7 @@ class ThemaAdsService:
                             stats['ad_groups_missing_theme_ad'] += 1
 
                 # Step 4: Execute batch mutations
-                if enable_operations:
-                    try:
-                        chunk_size = 5000
-                        for i in range(0, len(enable_operations), chunk_size):
-                            chunk = enable_operations[i:i+chunk_size]
-                            ad_group_ad_service.mutate_ad_group_ads(
-                                customer_id=customer_id,
-                                operations=chunk
-                            )
-                        logger.info(f"[{customer_id}] Enabled {len(enable_operations)} theme ads")
-                        async with stats_lock:
-                            stats['theme_ads_enabled'] += len(enable_operations)
-                    except Exception as e:
-                        logger.error(f"[{customer_id}] Failed to enable theme ads: {e}")
-                        async with stats_lock:
-                            stats['errors'].append(f"{customer_id}: Failed to enable theme ads - {e}")
-
+                # IMPORTANT: Pause originals FIRST to free up RSA slots, then enable theme ads
                 if pause_operations:
                     try:
                         chunk_size = 5000
@@ -2369,6 +2353,24 @@ class ThemaAdsService:
                         logger.error(f"[{customer_id}] Failed to pause THEMA_ORIGINAL ads: {e}")
                         async with stats_lock:
                             stats['errors'].append(f"{customer_id}: Failed to pause THEMA_ORIGINAL ads - {e}")
+
+                # Now enable theme ads (after pausing originals to free up slots)
+                if enable_operations:
+                    try:
+                        chunk_size = 5000
+                        for i in range(0, len(enable_operations), chunk_size):
+                            chunk = enable_operations[i:i+chunk_size]
+                            ad_group_ad_service.mutate_ad_group_ads(
+                                customer_id=customer_id,
+                                operations=chunk
+                            )
+                        logger.info(f"[{customer_id}] Enabled {len(enable_operations)} theme ads")
+                        async with stats_lock:
+                            stats['theme_ads_enabled'] += len(enable_operations)
+                    except Exception as e:
+                        logger.error(f"[{customer_id}] Failed to enable theme ads: {e}")
+                        async with stats_lock:
+                            stats['errors'].append(f"{customer_id}: Failed to enable theme ads - {e}")
 
                 async with stats_lock:
                     stats['customers_processed'] += 1
