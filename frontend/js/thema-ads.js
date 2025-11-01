@@ -466,7 +466,33 @@ async function runCheckup() {
     const btn = document.getElementById('checkupBtn');
 
     btn.disabled = true;
-    resultDiv.innerHTML = '<div class="alert alert-info">Running optimized check-up...</div>';
+
+    // Show enhanced progress display with spinner and progress bar
+    resultDiv.innerHTML = `
+        <div class="alert alert-info">
+            <div class="d-flex align-items-center mb-3">
+                <div class="spinner-border spinner-border-sm me-2" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+                <strong>Running optimized check-up...</strong>
+            </div>
+            <div class="progress mb-3" style="height: 25px;">
+                <div class="progress-bar progress-bar-striped progress-bar-animated bg-info"
+                     role="progressbar"
+                     style="width: 100%">
+                    Auditing ad groups and verifying theme ads...
+                </div>
+            </div>
+            <small class="text-muted">
+                <strong>Configuration:</strong>
+                ${skipAudited ? 'Skip previously audited' : 'Check all ad groups'}
+                ${limit ? ` | Limit: ${limit} ad groups` : ' | No limit'}
+                | Batch size: ${batchSize}
+                <br>
+                <em>Note: Progress updates will be shown after completion. The system is processing customers in parallel.</em>
+            </small>
+        </div>
+    `;
 
     try {
         const params = new URLSearchParams();
@@ -527,6 +553,96 @@ async function runCheckup() {
         }
     } catch (error) {
         resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function runCleanup() {
+    const dryRun = document.getElementById('cleanupDryRun').checked;
+    const resultDiv = document.getElementById('cleanupResult');
+    const btn = document.getElementById('cleanupBtn');
+
+    btn.disabled = true;
+
+    // Show progress
+    resultDiv.innerHTML = `
+        <div class="alert alert-info">
+            <div class="d-flex align-items-center mb-3">
+                <div class="spinner-border spinner-border-sm me-2" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+                <strong>${dryRun ? 'Analyzing' : 'Cleaning up'} conflicting labels across all 28 customers...</strong>
+            </div>
+            <div class="progress mb-3" style="height: 25px;">
+                <div class="progress-bar progress-bar-striped progress-bar-animated ${dryRun ? 'bg-info' : 'bg-warning'}"
+                     role="progressbar"
+                     style="width: 100%">
+                    ${dryRun ? 'Scanning for conflicting labels...' : 'Removing THEMA_ORIGINAL labels...'}
+                </div>
+            </div>
+            <small class="text-muted">
+                <strong>Mode:</strong> ${dryRun ? 'DRY RUN (preview only)' : 'LIVE (making changes)'}
+                <br>
+                <em>This may take 2-3 minutes to complete...</em>
+            </small>
+        </div>
+    `;
+
+    try {
+        const response = await fetch(`/api/thema-ads/cleanup-thema-original?dry_run=${dryRun}`, {
+            method: 'POST'
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            const alertType = dryRun ? 'info' : 'success';
+            const icon = dryRun ? 'bi-info-circle' : 'bi-check-circle';
+            const actionText = dryRun ? 'Would fix' : 'Fixed';
+
+            resultDiv.innerHTML = `
+                <div class="alert alert-${alertType}">
+                    <h5><i class="bi ${icon}"></i> ${dryRun ? 'Preview Complete' : 'Cleanup Complete!'}</h5>
+                    <hr>
+                    <div class="row text-center">
+                        <div class="col-md-4">
+                            <strong>Ads with Conflicts</strong><br>
+                            <span class="badge bg-warning fs-5">${data.total_checked.toLocaleString()}</span>
+                        </div>
+                        <div class="col-md-4">
+                            <strong>${actionText}</strong><br>
+                            <span class="badge ${dryRun ? 'bg-info' : 'bg-success'} fs-5">${data.total_fixed.toLocaleString()}</span>
+                        </div>
+                        <div class="col-md-4">
+                            <strong>Failed</strong><br>
+                            <span class="badge ${data.total_failed > 0 ? 'bg-danger' : 'bg-secondary'} fs-5">${data.total_failed}</span>
+                        </div>
+                    </div>
+                    <hr>
+                    <p class="mb-0">
+                        ${dryRun
+                            ? `<strong><i class="bi bi-exclamation-triangle"></i> Preview Mode:</strong>
+                               No changes were made. Uncheck "Dry-run mode" and click "Run Cleanup" again to execute.`
+                            : `<strong><i class="bi bi-check-circle"></i> Success:</strong>
+                               Removed THEMA_ORIGINAL labels from ${data.total_fixed.toLocaleString()} ads that have theme labels.`
+                        }
+                    </p>
+                </div>
+            `;
+        } else {
+            resultDiv.innerHTML = `
+                <div class="alert alert-danger">
+                    <strong>Error:</strong> ${data.detail || 'Cleanup failed'}
+                </div>
+            `;
+        }
+    } catch (error) {
+        resultDiv.innerHTML = `
+            <div class="alert alert-danger">
+                <strong>Error:</strong> ${error.message}
+            </div>
+        `;
     } finally {
         btn.disabled = false;
     }

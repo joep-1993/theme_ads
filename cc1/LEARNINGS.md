@@ -297,6 +297,29 @@ Successfully achieved **3-5x performance improvement** for theme ad creation (5 
 - **Files**: remove_all_duplicates.py lines 37-38
 - **Key Insight**: DATABASE_URL includes all connection info including password in single string
 
+### Missing get_customer_ids Method Error (2025-11-01)
+- **Problem**: Remove Duplicates function fails with AttributeError
+- **Error**: `AttributeError: 'ThemaAdsService' object has no attribute 'get_customer_ids'`
+- **Root Cause**: ThemaAdsService.remove_duplicates_all_customers() calls self.get_customer_ids() but method doesn't exist
+- **Solution**: Add get_customer_ids() method to ThemaAdsService class:
+  ```python
+  def get_customer_ids(self) -> List[str]:
+      """Load customer IDs from the account ids file."""
+      account_ids_file = Path(__file__).parent.parent / "thema_ads_optimized" / "account ids"
+      if not account_ids_file.exists():
+          logger.error(f"Account IDs file not found at {account_ids_file}")
+          return []
+
+      with open(account_ids_file, 'r') as f:
+          customer_ids = [line.strip() for line in f if line.strip()]
+
+      logger.info(f"Loaded {len(customer_ids)} customer IDs from account ids file")
+      return customer_ids
+  ```
+- **Files**: backend/thema_ads_service.py lines 27-38
+- **Important**: Requires Docker container restart to pick up changes in mounted volume files
+- **Key Insight**: Service methods that default to "all customers" should have helper method to load from whitelist file
+
 ### Container Auto-Reload Killing Long-Running Jobs (2025-10-20)
 - **Problem**: Uvicorn's `--reload` flag watches for file changes and restarts the container, killing long-running background jobs mid-process
 - **Impact**: Job 213 stopped at 43.2% (21,595/50,000 items) when we edited code, remained in "running" state but was actually dead
@@ -504,6 +527,46 @@ Found stale running job 399, marking as failed
 - **Correct Workflow**:
   1. ✅ Run discovery job to create missing theme ads
   2. ⏱️ Wait for discovery to complete
+
+## Patterns
+
+### Label Conflict Cleanup Pattern (2025-11-01)
+- **Problem**: Ads incorrectly have both THEMA_ORIGINAL and theme labels (THEME_BF, THEME_CM, etc.)
+- **Root Cause**: Theme ad creation process sometimes labels ads with both THEMA_ORIGINAL and theme labels
+- **Correct Behavior**:
+  - Theme ads should ONLY have theme labels (not THEMA_ORIGINAL)
+  - Original ads should ONLY have THEMA_ORIGINAL (not theme labels)
+- **Detection Pattern**: Query FROM ad_group_ad_label to find ads with conflicting labels
+  ```python
+  # Build map of ad -> labels
+  ad_labels: Dict[str, Set[str]] = defaultdict(set)
+
+  # Query all ads with any relevant labels
+  query = f"""
+      SELECT ad_group_ad.resource_name, label.name
+      FROM ad_group_ad_label
+      WHERE label.name IN ('THEMA_ORIGINAL', 'THEME_BF', 'THEME_CM', 'THEME_SK', 'THEME_KM')
+  """
+
+  # Find ads with both THEMA_ORIGINAL and theme labels
+  for ad_resource, labels in ad_labels.items():
+      if 'THEMA_ORIGINAL' in labels:
+          theme_labels_present = labels & {'THEME_BF', 'THEME_CM', 'THEME_SK', 'THEME_KM'}
+          if theme_labels_present:
+              # This ad has conflicting labels!
+              conflicting_ads.append((ad_resource, theme_labels_present))
+  ```
+- **Cleanup Pattern**: Batch remove THEMA_ORIGINAL labels from conflicting ads
+  - Process in batches of 1000 labels per API call
+  - Construct ad_group_ad_label resource names: `customers/{cid}/adGroupAdLabels/{ag_id}~{ad_id}~{label_id}`
+  - Use AdGroupAdLabelService.mutate_ad_group_ad_labels with remove operations
+- **Scope**: Process all 28 customers, all active themes (excluding Singles Day)
+- **Results**: Found ~85,000 ads with conflicts, cleaned up with 100% success rate
+- **Implementation**: thema_ads_optimized/cleanup_thema_original_labels.py
+- **Frontend Integration**: "Label Cleanup" tab with dry-run mode for safe preview before execution
+- **Key Insight**: Always run in dry-run mode first to preview changes before executing
+
+### Sequential Job Execution (continued)
   3. ✅ Run activation to enable correct theme per customer
   4. ✅ Verify results
 - **Exception**: If concurrent execution is required, reduce parallelism:
@@ -965,7 +1028,9 @@ for encoding in encodings:
 ### Google Ads API Query Filter Limits - Configurable Batch Size
 - **Error**: `FILTER_HAS_TOO_MANY_VALUES` - "Request contains an invalid argument"
 - **Cause**: WHERE IN clause with too many values (e.g., 50,000+ ad group resources)
-- **Solution**: Batch queries with user-configurable batch size (default: 7500)
+- **Solution**: Batch queries with configurable batch size
+  - **Discovery/Processing**: User-configurable batch size (default: 7500, previously 5000 after 2025-10-04 rate limit issues)
+  - **V2 Activation**: Fixed batch size of 1000 for THEMA_ORIGINAL ads query (implemented 2025-11-01)
 ```python
 # Frontend: User selects batch size (1000-10000, default 7500)
 batch_size = batchSizeInput.value || 7500
@@ -980,6 +1045,26 @@ async def prefetch_existing_ads_bulk(client, customer_id, ad_group_resources, ba
         resources_str = ", ".join(f"'{r}'" for r in batch)
         query = f"SELECT ... WHERE resource IN ({resources_str})"
         response = service.search(customer_id, query)
+
+# V2 Activation: Fixed batch size for THEMA_ORIGINAL ads query
+# (backend/thema_ads_service.py:2546-2589)
+ad_groups_list = list(ad_groups_with_theme)
+BATCH_SIZE = 1000  # Google Ads API limit for IN clause values
+
+for batch_idx in range(0, len(ad_groups_list), BATCH_SIZE):
+    batch = ad_groups_list[batch_idx:batch_idx + BATCH_SIZE]
+    ag_resources_str = "', '".join(batch)
+
+    original_ads_query = f"""
+        SELECT ad_group_ad.ad_group, ad_group_ad.resource_name, ad_group_ad.status
+        FROM ad_group_ad_label
+        WHERE ad_group_ad.ad_group IN ('{ag_resources_str}')
+        AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+        AND ad_group_ad.status != REMOVED
+        AND label.id = {original_label_id}
+    """
+    response = ga_service.search(customer_id=customer_id, query=original_ads_query)
+    # Accumulate results across batches...
 ```
 - **Impact**: Customers with 10k+ ad groups were failing completely before this fix
 - **Performance Optimization**:

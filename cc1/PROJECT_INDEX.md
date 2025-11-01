@@ -18,6 +18,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
   - `/api/thema-ads/themes` - Get list of supported themes
   - `/api/thema-ads/checkup` - OPTIMIZED audit of processed ad groups with skip_audited parameter (default: true)
   - `/api/thema-ads/remove-checkup-labels` - Remove THEMES_CHECK_DONE labels for clean audit runs
+  - `/api/thema-ads/cleanup-thema-original` - Remove THEMA_ORIGINAL labels from ads with theme labels; processes all 28 customers and 4 active themes; supports dry_run parameter (default: false); returns statistics (total_checked, total_fixed, total_failed); frontend: "Label Cleanup" tab between Check-up and Run All Themes; backend/main.py:1645
   - `/api/thema-ads/run-all-themes` - Discovery with theme selection (uses Query(None) for proper repeated param parsing)
   - `/api/thema-ads/activate-v2` - V2 AD-FIRST ultra-fast activation (10-100x faster); queries FROM ad_group_ad_label to directly target ads by label; two-step label resolution (get label.id by name, query ads by label.id); only 4 queries per customer vs thousands; parameters: customer_ids (optional), parallel_workers (default: 5), reset_labels (default: false)
   - `/api/thema-ads/activate-optimized` - OPTIMIZED activation with parallel processing (lines 1768-1824); processes customers in parallel (default: 5 workers), bulk queries for theme and original ads, batch status updates; parameters: customer_ids (optional), parallel_workers (default: 5), reset_labels (default: false)
@@ -31,7 +32,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
   - `remove_checkup_labels()` - Remove THEMES_CHECK_DONE labels from all ad groups (lines 512-599)
   - `activate_ads_per_plan()` - Original activation function with per-ad-group processing (lines 1525-1906)
   - `activate_ads_per_plan_optimized()` - OPTIMIZED: 5-10x faster activation (lines 1908-2180); parallel customer processing with configurable workers (default: 5), bulk queries for theme-labeled ads and THEMA_ORIGINAL ads, batch status updates (enable theme ads, pause original ads); eliminates per-ad-group operations; uses asyncio.gather for concurrent execution and async locks for thread-safe stats
-  - `activate_ads_per_plan_v2()` - V2 AD-FIRST: 10-100x faster activation (lines 2266-2512); revolutionary approach queries FROM ad_group_ad_label instead of ad groups; two-step label resolution gets label.id by name then queries ads directly by label.id; only 4 queries per customer (get theme label ID, query theme ads, get original label ID, query original ads); parallel customer processing with configurable workers; batch mutations (5000 ads per chunk)
+  - `activate_ads_per_plan_v2()` - V2 AD-FIRST: 10-100x faster activation (lines 2266-2512); revolutionary approach queries FROM ad_group_ad_label instead of ad groups; two-step label resolution gets label.id by name then queries ads directly by label.id; only 4 queries per customer (get theme label ID, query theme ads, get original label ID, query original ads); THEMA_ORIGINAL ads query batched (1000 ad groups per batch) to avoid FILTER_HAS_TOO_MANY_VALUES on large customers; parallel customer processing with configurable workers; batch mutations (5000 ads per chunk)
   - `get_next_pending_job()` - Returns oldest pending job ID (FIFO)
   - `_start_next_job_if_queue_enabled()` - Auto-queue logic: waits 30s, checks queue state, starts next job
 - `backend/database.py` - Database connection management, auto-queue state persistence
@@ -44,6 +45,7 @@ _Technical reference for the project. Update when: architecture changes, new pat
 - `thema_ads_optimized/themes.py` - Theme management module (load content, get labels, validate themes)
 - `thema_ads_optimized/account ids` - Whitelist of 28 active customer IDs (discovery loads from this file)
 - `thema_ads_optimized/` - CLI automation tools
+- `thema_ads_optimized/cleanup_thema_original_labels.py` - Label conflict cleanup script; removes THEMA_ORIGINAL labels from ads that have theme labels; processes 4 active themes (BF, CM, SK, KM) excluding Singles Day; supports dry-run mode; batch operations (1000 labels per API call); found ~85,000 conflicting ads across 28 customers; integrated into frontend via /api/thema-ads/cleanup-thema-original endpoint
 - `thema_ads_optimized/operations/` - Google Ads API operations
   - `rsa_management.py` - Smart RSA slot management for 3-ad limit (not yet integrated)
 - `thema_ads_optimized/processors/` - Data processing logic
@@ -156,10 +158,16 @@ _Technical reference for the project. Update when: architecture changes, new pat
 
 ## Database Schema
 
-### Multi-Theme Support
-- `thema_ads_jobs.theme_name` VARCHAR(50) - Theme for job (NO DEFAULT VALUE - must be explicitly set during job creation; database default removed 2025-10-24 to prevent incorrect theme assignment via fallback; theme must be provided in create_job() call)
-- `thema_ads_job_items.theme_name` VARCHAR(50) - Theme for specific ad group
-- `thema_ads_input_data.theme_name` VARCHAR(50) - Theme from original upload
+### Core Tables
+- `thema_ads_jobs` - Job tracking table
+  - `theme_name` VARCHAR(50) - Theme for job (NO DEFAULT VALUE - must be explicitly set during job creation; database default removed 2025-10-24 to prevent incorrect theme assignment via fallback; theme must be provided in create_job() call)
+  - `batch_size` INTEGER DEFAULT 7500 - API query batch size for this job
+  - `skipped_ad_groups` INTEGER DEFAULT 0 - Count of ad groups skipped (already processed with SD_DONE label)
+  - `is_repair_job` BOOLEAN DEFAULT FALSE - If true, bypasses SD_DONE check to reprocess items
+- `thema_ads_job_items` - Individual ad group processing status
+  - `theme_name` VARCHAR(50) - Theme for specific ad group
+- `thema_ads_input_data` - Original upload data
+  - `theme_name` VARCHAR(50) - Theme from original upload
 - `system_settings` table - Store system-wide configuration (auto-queue state)
   - `setting_key` VARCHAR(100) UNIQUE - Setting identifier (e.g., 'auto_queue_enabled')
   - `setting_value` TEXT - Setting value (e.g., 'true' or 'false')
@@ -208,17 +216,23 @@ docker-compose exec -T db psql -U postgres -d thema_ads -c "DELETE FROM thema_ad
 ## Configuration
 
 ### Environment Variables
+- `DATABASE_URL` - PostgreSQL connection string (format: postgresql://user:password@host:port/database)
 - `GOOGLE_DEVELOPER_TOKEN` - Google Ads API developer token
 - `GOOGLE_REFRESH_TOKEN` - OAuth refresh token
 - `GOOGLE_CLIENT_ID` - OAuth client ID
 - `GOOGLE_CLIENT_SECRET` - OAuth client secret
 - `GOOGLE_LOGIN_CUSTOMER_ID` - MCC account ID
-- `MAX_CONCURRENT_CUSTOMERS` - Parallel customer processing limit (default: 5)
-- `BATCH_SIZE` - Items per API query (default: 5000)
+- `MAX_CONCURRENT_CUSTOMERS` - Parallel customer processing limit (default: 5, optimized: 10)
+- `MAX_CONCURRENT_OPERATIONS` - Maximum concurrent operations (default: 50)
+- `BATCH_SIZE` - Items per API query (code default: 5000; database stores per-job value, typically 7500)
 - `API_RETRY_ATTEMPTS` - Retry attempts for failed API calls (default: 5)
 - `API_RETRY_DELAY` - Initial retry delay in seconds (default: 2.0)
 - `API_BATCH_DELAY` - Delay between API batches in seconds (default: 2.0)
 - `CUSTOMER_DELAY` - Delay between processing customers in seconds (default: 30.0)
+- `LOG_LEVEL` - Logging verbosity (default: INFO, options: DEBUG, INFO, WARNING, ERROR)
+- `DRY_RUN` - Test mode without making actual changes (default: false)
+- `INPUT_FILE` - Default input file path (default: input_data.xlsx)
+- `ENABLE_CACHING` - Enable response caching (default: true)
 
 ### API Parameters (frontend-configurable)
 - `batch_size` - Items per API query (default: 5000, range: 1000-10000)
@@ -284,6 +298,12 @@ theme_ads/
 │                                    # Features: batch ad creation, themed content from /themes/ files, proper labeling,
 │                                    # ALL_THEMES_DONE label when all 4 themes present, progress persistence (fill_missing_progress_v3.json),
 │                                    # parallel processing (3 workers), campaign_theme=1 URL parameter, path1=theme_name ad field
+├── activate_ads_v2.py               # Utility: Test V2 activation function independently
+├── pause_enabled_themed_ads_parallel.py # Utility: Pause all enabled theme ads across customers
+├── fix_theme_labels_parallel.py     # Utility: Fix incorrect theme label assignments
+├── create_black_friday_ads.py       # Utility: One-off script for Black Friday ad creation
+├── investigate_ad_group.py          # Utility: Debug tool for inspecting specific ad groups
+├── [20+ additional utility scripts] # Note: Root directory contains ad-hoc testing/maintenance scripts
 ├── frontend/
 │   ├── thema-ads.html              # Web UI (4 tabs: Excel Upload, CSV Upload, Auto-Discover, Check-up)
 │   └── js/
@@ -314,4 +334,4 @@ theme_ads/
 ```
 
 ---
-_Last updated: 2025-10-28_
+_Last updated: 2025-11-01_

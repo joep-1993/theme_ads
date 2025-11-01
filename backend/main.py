@@ -1642,6 +1642,93 @@ async def remove_checkup_labels():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/thema-ads/cleanup-thema-original")
+async def cleanup_thema_original_labels(dry_run: bool = False):
+    """
+    Remove THEMA_ORIGINAL labels from ads that also have theme labels.
+
+    Theme ads should ONLY have theme labels (THEME_BF, THEME_CM, etc), not THEMA_ORIGINAL.
+    This function finds and removes incorrect THEMA_ORIGINAL labels from theme ads.
+
+    Args:
+        dry_run: If True, only report what would be changed without making changes (default: False)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"Starting THEMA_ORIGINAL cleanup (dry_run={dry_run})")
+
+    try:
+        from pathlib import Path
+        from dotenv import load_dotenv
+        import subprocess
+
+        # Load environment variables
+        env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+        if not env_path.exists():
+            raise HTTPException(status_code=500, detail="Google Ads credentials not configured")
+
+        # Run the cleanup script
+        script_path = Path(__file__).parent.parent / "thema_ads_optimized" / "cleanup_thema_original_labels.py"
+        if not script_path.exists():
+            raise HTTPException(status_code=500, detail="Cleanup script not found")
+
+        # Build command
+        cmd = ["python3", str(script_path)]
+        if not dry_run:
+            cmd.append("--execute")
+
+        logger.info(f"Running cleanup script: {' '.join(cmd)}")
+
+        # Run script and capture output
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600  # 10 minute timeout
+        )
+
+        if result.returncode != 0:
+            logger.error(f"Cleanup script failed: {result.stderr}")
+            raise HTTPException(status_code=500, detail=f"Cleanup failed: {result.stderr}")
+
+        # Parse output for summary
+        output_lines = result.stderr.split('\n')
+
+        # Extract summary statistics
+        total_checked = 0
+        total_fixed = 0
+        total_failed = 0
+
+        for line in output_lines:
+            if "Total ads with conflicting labels:" in line:
+                total_checked = int(line.split(":")[-1].strip())
+            elif "Successfully fixed:" in line:
+                total_fixed = int(line.split(":")[-1].strip())
+            elif "Failed:" in line and "INFO" in line:
+                total_failed = int(line.split(":")[-1].strip())
+
+        logger.info(f"Cleanup complete: {total_fixed} ads fixed, {total_failed} failed")
+
+        return {
+            "success": True,
+            "dry_run": dry_run,
+            "total_checked": total_checked,
+            "total_fixed": total_fixed,
+            "total_failed": total_failed,
+            "message": f"{'Would fix' if dry_run else 'Fixed'} {total_fixed} ads with conflicting labels"
+        }
+
+    except subprocess.TimeoutExpired:
+        logger.error("Cleanup script timed out")
+        raise HTTPException(status_code=500, detail="Cleanup operation timed out")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Cleanup failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/thema-ads/run-all-themes")
 async def run_all_themes(
     background_tasks: BackgroundTasks = None,

@@ -24,6 +24,19 @@ class ThemaAdsService:
         self.current_job_id = None
         self.is_running = False
 
+    def get_customer_ids(self) -> List[str]:
+        """Load customer IDs from the account ids file."""
+        account_ids_file = Path(__file__).parent.parent / "thema_ads_optimized" / "account ids"
+        if not account_ids_file.exists():
+            logger.error(f"Account IDs file not found at {account_ids_file}")
+            return []
+
+        with open(account_ids_file, 'r') as f:
+            customer_ids = [line.strip() for line in f if line.strip()]
+
+        logger.info(f"Loaded {len(customer_ids)} customer IDs from account ids file")
+        return customer_ids
+
     def _fetch_campaign_info_with_client(self, client, customer_id: str, ad_group_id: str) -> Dict:
         """Fetch campaign information from Google Ads API using existing client."""
         try:
@@ -817,7 +830,7 @@ class ThemaAdsService:
                         label_operation = client.get_type('LabelOperation')
                         label = label_operation.create
                         label.name = audit_label_name
-                        label.description = 'Ad group audited for theme DONE labels - has valid themed ads'
+                        # Note: Google Ads API labels don't support description field
 
                         response = label_service.mutate_labels(
                             customer_id=customer_id,
