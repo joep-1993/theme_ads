@@ -2301,6 +2301,8 @@ class ThemaAdsService:
                             original_ads.append(ad)
 
                     if theme_ad:
+                        needs_activation = False
+
                         # Enable theme ad if paused
                         if theme_ad['status'] == 'PAUSED':
                             operation = client.get_type("AdGroupAdOperation")
@@ -2309,6 +2311,7 @@ class ThemaAdsService:
                             ad_group_ad.status = client.enums.AdGroupAdStatusEnum.ENABLED
                             operation.update_mask.paths.append('status')
                             enable_operations.append(operation)
+                            needs_activation = True
 
                         # Pause all THEMA_ORIGINAL ads
                         for orig_ad in original_ads:
@@ -2319,9 +2322,13 @@ class ThemaAdsService:
                                 ad_group_ad.status = client.enums.AdGroupAdStatusEnum.PAUSED
                                 operation.update_mask.paths.append('status')
                                 pause_operations.append(operation)
+                                needs_activation = True
 
                         async with stats_lock:
-                            stats['ad_groups_activated'] += 1
+                            if needs_activation:
+                                stats['ad_groups_activated'] += 1
+                            else:
+                                stats['ad_groups_already_correct'] += 1
                     else:
                         # Missing theme ad
                         add_activation_missing_ad(
@@ -2453,7 +2460,11 @@ class ThemaAdsService:
         stats = {
             'customers_processed': 0,
             'customers_failed': 0,
+            'ad_groups_checked': 0,
             'ad_groups_activated': 0,
+            'ad_groups_already_correct': 0,
+            'ad_groups_skipped_done_label': 0,
+            'ad_groups_missing_theme_ad': 0,
             'theme_ads_enabled': 0,
             'original_ads_paused': 0,
             'errors': []
