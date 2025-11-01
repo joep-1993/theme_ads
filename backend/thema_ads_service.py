@@ -2523,7 +2523,7 @@ class ThemaAdsService:
                 """
 
                 # Organize theme ads by ad group
-                theme_ads_by_ag = {}  # ad_group_resource -> ad_resource
+                theme_ads_by_ag = {}  # ad_group_resource -> list of ad dicts
                 ad_groups_with_theme = set()
 
                 try:
@@ -2533,13 +2533,18 @@ class ThemaAdsService:
                         ad_res = row.ad_group_ad.resource_name
                         ad_status = row.ad_group_ad.status.name
 
-                        theme_ads_by_ag[ag_res] = {
+                        # Support multiple theme ads per ad group (store as list)
+                        if ag_res not in theme_ads_by_ag:
+                            theme_ads_by_ag[ag_res] = []
+
+                        theme_ads_by_ag[ag_res].append({
                             'resource': ad_res,
                             'status': ad_status
-                        }
+                        })
                         ad_groups_with_theme.add(ag_res)
 
-                    logger.info(f"[{customer_id}] Found {len(theme_ads_by_ag)} theme ads in {len(ad_groups_with_theme)} ad groups")
+                    total_theme_ads = sum(len(ads) for ads in theme_ads_by_ag.values())
+                    logger.info(f"[{customer_id}] Found {total_theme_ads} theme ads in {len(ad_groups_with_theme)} ad groups")
                 except Exception as e:
                     logger.error(f"[{customer_id}] Failed to query theme ads: {e}")
                     async with stats_lock:
@@ -2630,7 +2635,7 @@ class ThemaAdsService:
                     enable_operations = []
 
                     # Build operations for this batch of ad groups
-                    for ag_res, theme_ad in batch:
+                    for ag_res, theme_ads in batch:
                         needs_changes = False
 
                         # Pause all THEMA_ORIGINAL ads in this ad group FIRST
@@ -2645,15 +2650,16 @@ class ThemaAdsService:
                                     pause_operations.append(operation)
                                     needs_changes = True
 
-                        # Enable theme ad if paused
-                        if theme_ad['status'] == 'PAUSED':
-                            operation = client.get_type("AdGroupAdOperation")
-                            ad_group_ad = operation.update
-                            ad_group_ad.resource_name = theme_ad['resource']
-                            ad_group_ad.status = client.enums.AdGroupAdStatusEnum.ENABLED
-                            operation.update_mask.paths.append('status')
-                            enable_operations.append(operation)
-                            needs_changes = True
+                        # Enable ALL paused theme ads in this ad group
+                        for theme_ad in theme_ads:
+                            if theme_ad['status'] == 'PAUSED':
+                                operation = client.get_type("AdGroupAdOperation")
+                                ad_group_ad = operation.update
+                                ad_group_ad.resource_name = theme_ad['resource']
+                                ad_group_ad.status = client.enums.AdGroupAdStatusEnum.ENABLED
+                                operation.update_mask.paths.append('status')
+                                enable_operations.append(operation)
+                                needs_changes = True
 
                         # Track this ad group if it needed changes
                         if needs_changes:
