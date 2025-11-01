@@ -294,6 +294,7 @@ theme_ads/
 ├── remove_all_duplicates_parallel.py # Utility: Parallel version with 3 workers (60% faster, 58,771 ads removed)
 ├── check_ad_groups.py              # Utility: Check ad group labels and theme ads
 ├── audit_theme_done_labels_optimized.py # Utility: OPTIMIZED audit script verifies themed ads exist for DONE labels, removes invalid labels, creates repair jobs; features customer pre-filtering, bulk theme processing, HS/ campaign filter, chunking, THEMES_CHECK_DONE tracking, parallel execution (5 workers)
+├── validate_theme_ad_groups.py          # Utility: Data integrity validation script; verifies all ad groups with theme ads (THEME_BF, THEME_CM, THEME_SK, THEME_KM) also have THEMA_ORIGINAL ads; uses set operations (theme_ad_groups - original_ad_groups) to find orphaned theme ads; processes all 28 customers with --limit option for testing; validates label cleanup success; reports statistics per customer and summary; location: thema_ads_optimized/validate_theme_ad_groups.py
 ├── fill_missing_themed_ads_parallel_v3.py # Utility: Gap-filler for ad groups with THEME_*_DONE labels but missing theme ads
 │                                    # Features: batch ad creation, themed content from /themes/ files, proper labeling,
 │                                    # ALL_THEMES_DONE label when all 4 themes present, progress persistence (fill_missing_progress_v3.json),

@@ -856,10 +856,53 @@ async function activateAds() {
         <div class="alert alert-info">
             <strong>Activating ads (optimized)...</strong><br>
             Processing ${parallelWorkers} customers in parallel for maximum speed.<br>
-            This may take several minutes depending on the number of ad groups.<br>
-            Please wait...
+            <div class="mt-3">
+                <strong>Progress:</strong> <span id="activationProgress">Starting...</span><br>
+                <div class="progress mt-2" style="height: 25px;">
+                    <div id="activationProgressBar" class="progress-bar progress-bar-striped progress-bar-animated"
+                         role="progressbar" style="width: 0%">0%</div>
+                </div>
+            </div>
         </div>
     `;
+
+    // Start progress polling
+    let pollInterval = null;
+    let lastJobsSnapshot = null;
+
+    const updateProgress = async () => {
+        try {
+            const jobsResponse = await fetch('/api/thema-ads/jobs?limit=50');
+            const jobsData = await jobsResponse.json();
+            const runningJobs = jobsData.jobs.filter(j => j.status === 'running' || j.status === 'pending');
+
+            if (runningJobs.length > 0) {
+                // Calculate total progress across all running jobs
+                let totalAds = 0;
+                let processedAds = 0;
+
+                runningJobs.forEach(job => {
+                    totalAds += job.total_ad_groups || 0;
+                    processedAds += job.processed_ad_groups || 0;
+                });
+
+                const progressPct = totalAds > 0 ? Math.round((processedAds / totalAds) * 100) : 0;
+
+                // Update progress display
+                document.getElementById('activationProgress').textContent =
+                    `${processedAds.toLocaleString()} / ${totalAds.toLocaleString()} ad groups processed`;
+                document.getElementById('activationProgressBar').style.width = `${progressPct}%`;
+                document.getElementById('activationProgressBar').textContent = `${progressPct}%`;
+
+                lastJobsSnapshot = runningJobs;
+            }
+        } catch (e) {
+            console.error('Failed to update progress:', e);
+        }
+    };
+
+    // Poll every 2 seconds
+    pollInterval = setInterval(updateProgress, 2000);
 
     try {
         // Parse customer IDs if provided
@@ -916,6 +959,10 @@ async function activateAds() {
     } catch (error) {
         resultDiv.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
     } finally {
+        // Stop polling
+        if (pollInterval) {
+            clearInterval(pollInterval);
+        }
         btn.disabled = false;
     }
 }

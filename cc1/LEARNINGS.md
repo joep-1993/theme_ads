@@ -6,6 +6,10 @@ _Capture mistakes, solutions, and patterns. Update when: errors occur, bugs are 
 # Thema Ads Web Interface (Quick Start)
 ./start-thema-ads.sh           # Build, start, and initialize everything
 
+# Data Integrity Validation
+docker exec theme_ads-app-1 python3 /app/thema_ads_optimized/validate_theme_ad_groups.py  # Validate all customers
+docker exec theme_ads-app-1 python3 /app/thema_ads_optimized/validate_theme_ad_groups.py --limit 3  # Test first 3 customers
+
 # Thema Ads Optimized CLI
 cd thema_ads_optimized/
 ./docker-run.sh setup          # Setup environment and directories
@@ -167,6 +171,29 @@ Successfully achieved **3-5x performance improvement** for theme ad creation (5 
 - Auto-Discover (single theme per job)
 - Run All Themes (discovers multiple themes, creates optimized jobs per theme)
 - CSV Upload (uses same job processing backend)
+
+### Database Polling for Real-Time Progress Without Backend Changes (2025-11-01)
+Successfully added real-time progress visualization to activation UI **with zero backend modifications**.
+
+**Pattern**: Frontend polls existing database fields to display progress
+- **Implementation**:
+  - `setInterval()` with 2-second delay
+  - Fetch `/api/thema-ads/jobs?limit=50` endpoint
+  - Filter for running/pending jobs
+  - Calculate progress from `processed_ad_groups` / `total_ad_groups`
+  - Update UI elements: progress counter and animated bar
+- **Key Features**:
+  - Zero backend changes required (reads existing database schema)
+  - No performance impact (reads from database only)
+  - Works with multiple parallel jobs (aggregates progress across all)
+  - Proper cleanup with `clearInterval()` in finally block
+- **Benefits**:
+  - Eliminates user confusion during long operations (30+ minutes)
+  - Shows "X / Y ad groups processed" with percentage
+  - Updates every 2 seconds with animated striped progress bar
+- **Implementation**: frontend/js/thema-ads.js `activateAds()` function lines 859-965
+- **Use Cases**: Any long-running operation where backend already tracks progress in database (activations, discoveries, repairs)
+- **Key Insight**: Leverage existing database fields instead of adding new endpoints; polling every 2-3 seconds is efficient enough for progress updates
 
 ---
 
@@ -479,6 +506,19 @@ for batch_start in range(0, len(ad_group_resources), BATCH_SIZE):
   4. **Single pass**: No repeated queries for same data
 - **Files Modified**: `backend/thema_ads_service.py` (lines 962-1126)
 - **Testing**: Ready for validation with limit=500-1000
+
+### Frontend UI Stuck Showing Old Activation Message (2025-11-01)
+- **Problem**: Frontend displays "Activating ads (optimized)...Progress: Starting..." even after jobs complete
+- **Symptoms**:
+  - API responsive (GET requests to /api/thema-ads/jobs returning 200 OK)
+  - Database shows 0 running/pending jobs
+  - UI frozen with activation message from previous session
+- **Root Cause**: UI state not properly cleared when previous activation job completed; polling interval may have continued
+- **Solution**: Page refresh (F5 or Ctrl+R) clears stuck message
+- **Prevention**: Progress visualization implemented in this session (frontend/js/thema-ads.js lines 859-965) includes proper cleanup:
+  - `clearInterval(pollInterval)` in finally block prevents memory leaks
+  - Proper state management ensures UI clears after activation completes
+- **Key Insight**: UI polling without proper cleanup can leave stale messages; always clean up intervals/timers
 
 ### Container Restart Kills Concurrent Jobs Simultaneously (2025-10-31)
 - **Problem**: Multiple jobs running concurrently all fail at exact same time when container restarts
