@@ -507,18 +507,51 @@ for batch_start in range(0, len(ad_group_resources), BATCH_SIZE):
 - **Files Modified**: `backend/thema_ads_service.py` (lines 962-1126)
 - **Testing**: Ready for validation with limit=500-1000
 
+### How to Check if Activation is Actually Running (2025-11-01)
+**CRITICAL**: Always check these sources FIRST before assuming activation is stuck or completed:
+
+**Step 1: Check for V2 activation** (V2 doesn't create database jobs!):
+```bash
+docker logs --tail 200 theme_ads-app-1 2>&1 | grep "POST /api/thema-ads/activate"
+```
+- If you see `/activate-v2`, it's running but won't show in job list
+- V2 activation works directly via Google Ads API (10-100x faster, no jobs)
+- Progress visualization shows "Starting..." forever with V2 (this is expected)
+
+**Step 2: Check for active Google Ads API processing**:
+```bash
+docker logs --since "5m" theme_ads-app-1 2>&1 | grep -E "(Processing customer|Batch [0-9]+:|Request made)"
+```
+- Look for "Processing customer {id}" or "[customer_id] Batch X:"
+- Look for Google Ads API request logs
+- If you see these, activation IS running (even if UI says "Starting...")
+
+**Step 3: Check database for jobs** (only works for non-V2):
+```bash
+docker exec theme_ads-db-1 psql -U postgres -d thema_ads -c \
+  "SELECT id, status, processed_ad_groups, total_ad_groups FROM thema_ads_jobs WHERE status = 'running';"
+```
+- Returns 0 rows for V2 activation (this is NORMAL - V2 doesn't create jobs)
+- Returns job data for regular activation/optimized activation
+
+**Key Insight**: Checking ONLY the database is insufficient. V2 activation doesn't create jobs, so you MUST check Docker logs first.
+
 ### Frontend UI Stuck Showing Old Activation Message (2025-11-01)
 - **Problem**: Frontend displays "Activating ads (optimized)...Progress: Starting..." even after jobs complete
 - **Symptoms**:
   - API responsive (GET requests to /api/thema-ads/jobs returning 200 OK)
   - Database shows 0 running/pending jobs
-  - UI frozen with activation message from previous session
-- **Root Cause**: UI state not properly cleared when previous activation job completed; polling interval may have continued
-- **Solution**: Page refresh (F5 or Ctrl+R) clears stuck message
-- **Prevention**: Progress visualization implemented in this session (frontend/js/thema-ads.js lines 859-965) includes proper cleanup:
-  - `clearInterval(pollInterval)` in finally block prevents memory leaks
-  - Proper state management ensures UI clears after activation completes
-- **Key Insight**: UI polling without proper cleanup can leave stale messages; always clean up intervals/timers
+  - UI shows "Progress: Starting..." indefinitely
+- **Root Cause - TWO SCENARIOS**:
+  1. **Actual stuck state**: UI not properly cleared when previous job completed
+  2. **V2 activation running**: Progress shows "Starting..." because V2 doesn't create trackable jobs in database
+- **Solution**:
+  - **FIRST**: Check if activation is actually running (see "How to Check if Activation is Actually Running" above)
+  - If activation IS running (V2): Wait for completion (usually 5-10 minutes, very fast)
+  - If activation NOT running: Page refresh (F5 or Ctrl+R) clears stuck message
+- **Prevention**: Progress visualization (frontend/js/thema-ads.js:859-965) includes cleanup for regular activation
+- **Limitation**: Progress visualization doesn't work with V2 activation (no database jobs to poll)
+- **Key Insight**: Always verify actual activation status via Docker logs before assuming UI is stuck
 
 ### Container Restart Kills Concurrent Jobs Simultaneously (2025-10-31)
 - **Problem**: Multiple jobs running concurrently all fail at exact same time when container restarts
