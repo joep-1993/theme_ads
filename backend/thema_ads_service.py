@@ -2621,6 +2621,7 @@ class ThemaAdsService:
 
                 total_paused = 0
                 total_enabled = 0
+                ad_groups_needing_activation = set()  # Track ad groups that need changes
 
                 for batch_idx in range(0, len(ad_groups_list), batch_size):
                     batch = ad_groups_list[batch_idx:batch_idx+batch_size]
@@ -2630,6 +2631,8 @@ class ThemaAdsService:
 
                     # Build operations for this batch of ad groups
                     for ag_res, theme_ad in batch:
+                        needs_changes = False
+
                         # Pause all THEMA_ORIGINAL ads in this ad group FIRST
                         if ag_res in original_ads_by_ag:
                             for orig_ad in original_ads_by_ag[ag_res]:
@@ -2640,6 +2643,7 @@ class ThemaAdsService:
                                     ad_group_ad.status = client.enums.AdGroupAdStatusEnum.PAUSED
                                     operation.update_mask.paths.append('status')
                                     pause_operations.append(operation)
+                                    needs_changes = True
 
                         # Enable theme ad if paused
                         if theme_ad['status'] == 'PAUSED':
@@ -2649,6 +2653,11 @@ class ThemaAdsService:
                             ad_group_ad.status = client.enums.AdGroupAdStatusEnum.ENABLED
                             operation.update_mask.paths.append('status')
                             enable_operations.append(operation)
+                            needs_changes = True
+
+                        # Track this ad group if it needed changes
+                        if needs_changes:
+                            ad_groups_needing_activation.add(ag_res)
 
                     # Step 4: Execute pause operations for this batch
                     if pause_operations:
@@ -2676,11 +2685,17 @@ class ThemaAdsService:
                             async with stats_lock:
                                 stats['errors'].append(f"{customer_id}: Batch {batch_idx//batch_size + 1}: Failed to enable - {e}")
 
+                # Calculate ad groups that were already correct
+                ad_groups_already_correct = len(theme_ads_by_ag) - len(ad_groups_needing_activation)
+
                 logger.info(f"[{customer_id}] Paused {total_paused} THEMA_ORIGINAL ads, Enabled {total_enabled} theme ads")
+                logger.info(f"[{customer_id}] Activated: {len(ad_groups_needing_activation)}, Already correct: {ad_groups_already_correct}")
                 async with stats_lock:
                     stats['original_ads_paused'] += total_paused
                     stats['theme_ads_enabled'] += total_enabled
-                    stats['ad_groups_activated'] += len(theme_ads_by_ag)
+                    stats['ad_groups_activated'] += len(ad_groups_needing_activation)
+                    stats['ad_groups_already_correct'] += ad_groups_already_correct
+                    stats['ad_groups_checked'] += len(theme_ads_by_ag)
                     stats['customers_processed'] += 1
 
                 logger.info(f"[{customer_id}] V2 Completed successfully")
