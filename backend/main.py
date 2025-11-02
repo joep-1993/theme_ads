@@ -5,6 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from typing import List, Optional
 import csv
 import io
+import re
 from datetime import datetime
 from pathlib import Path
 from backend.database import get_db_connection
@@ -1287,7 +1288,14 @@ async def download_failed_items(job_id: int):
             # Format reason based on status and error message
             if item['status'] == 'skipped':
                 if item['error_message'] and 'Already processed' in item['error_message']:
-                    reason = "Ad group has 'SD_DONE' label (already processed)"
+                    # Extract the actual theme label from error message (e.g., "has THEME_KM_DONE label")
+                    match = re.search(r'has (THEME_\w+_DONE) label', item['error_message'])
+                    if match:
+                        theme_label = match.group(1)
+                        reason = f"Ad group has '{theme_label}' label (already processed)"
+                    else:
+                        # Fallback if pattern doesn't match
+                        reason = item['error_message']
                 elif item['error_message'] and 'No existing ad' in item['error_message']:
                     reason = "Ad group has 0 ads"
                 else:
