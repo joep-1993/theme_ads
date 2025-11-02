@@ -1972,7 +1972,7 @@ async def activate_ads_v2_endpoint(
 
 @app.post("/api/thema-ads/remove-duplicates")
 async def remove_duplicates_endpoint(
-    customer_ids: List[str] = None,
+    customer_ids: List[str] = Query(None),
     limit: int = None,
     dry_run: bool = True,
     reset_labels: bool = False

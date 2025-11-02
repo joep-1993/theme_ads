@@ -2672,5 +2672,60 @@ _Last updated: 2025-10-30_
   - Parallel processing with multiple workers (3 concurrent customers)
 - **Key Learning**: Batch operations + file-based templates + proper labeling = reliable gap-filling system
 
+### Remove Duplicates Batch Size Optimization (2025-11-02)
+
+**Problem**: Google Ads API timeout errors (RPC_DEADLINE_TOO_SHORT) and concurrent modification errors when removing large numbers of duplicate ads.
+
+**Root Cause**: Batch size of 5,000 ads per API call exceeded Google Ads API timeout limits
+- Large customers (e.g., 8338942127 with 11,095 duplicates) would fail with 0 ads removed
+- Error: "Multiple requests were attempting to modify the same resource at once"
+- Initial run across 28 customers: 60,667 ads removed out of ~101,000 duplicates found (~40% failure rate)
+
+**Solution**: Reduce batch size from 5,000 to 500 ads per API call
+
+**Implementation**:
+```python
+# thema_ads_optimized/remove_duplicates_standalone.py line 307
+# Before:
+batch_size = 5000  # TOO LARGE - causes timeouts
+
+# After:
+batch_size = 500   # Optimal for reliability
+```
+
+**Results After Fix**:
+- Customer 8338942127: Successfully removed all 11,095 duplicate ads (100% success)
+- No timeout errors or concurrent modification errors
+- Processing time: ~4.5 minutes for 11,095 ads (23 batches of 500)
+- Average: ~6.5 seconds per batch of 500 ads
+
+**Key Learning**: Google Ads API batch operations have implicit timeout limits. For bulk ad removal operations:
+- **Batch size 5,000**: Causes RPC_DEADLINE_TOO_SHORT errors
+- **Batch size 500**: Reliable with no timeout issues
+- **Trade-off**: More API calls but 100% reliability vs fewer calls with failures
+
+**Files Affected**:
+- `thema_ads_optimized/remove_duplicates_standalone.py` (line 307)
+- Backend service may need similar fix if used via frontend
+
+**Frontend Integration**:
+- Remove duplicates function IS integrated into web UI
+- Tab: "Remove Duplicates" in frontend/thema-ads.html
+- JavaScript function calls `/api/thema-ads/remove-duplicates` endpoint
+
+**Testing Commands**:
+```bash
+# Test on specific customer
+docker exec -d theme_ads-app-1 bash -c \
+  "python3 /app/thema_ads_optimized/remove_duplicates_standalone.py --live --customers CUSTOMER_ID > /tmp/remove_duplicates.log 2>&1"
+
+# Check progress
+docker exec theme_ads-app-1 tail -50 /tmp/remove_duplicates.log
+
+# Full run with parallel processing
+docker exec -d theme_ads-app-1 bash -c \
+  "python3 /app/thema_ads_optimized/remove_duplicates_standalone.py --live --workers 3 > /tmp/remove_duplicates_full.log 2>&1"
+```
+
 ---
-_Last updated: 2025-10-29_
+_Last updated: 2025-11-02_

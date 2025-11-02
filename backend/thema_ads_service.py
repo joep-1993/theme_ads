@@ -2757,6 +2757,7 @@ class ThemaAdsService:
         from collections import defaultdict
 
         logger.info(f"Starting duplicate removal (dry_run={dry_run}, reset_labels={reset_labels})")
+        logger.info(f"Customer IDs to process: {customer_ids}")
 
         # Get customer IDs
         if customer_ids is None:
