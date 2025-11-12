@@ -285,6 +285,7 @@ async function refreshJobs() {
                         ${job.status === 'pending' ? `<button class="btn btn-sm btn-success" onclick="startJobById(${job.id})">Start</button>` : ''}
                         ${job.status === 'running' ? `<button class="btn btn-sm btn-warning" onclick="pauseJobById(${job.id})">Pause</button>` : ''}
                         ${job.status === 'paused' || job.status === 'failed' ? `<button class="btn btn-sm btn-info" onclick="resumeJobById(${job.id})">Resume</button>` : ''}
+                        ${job.is_repair_job && (job.status === 'completed' || job.status === 'failed' || job.status === 'running') ? `<button class="btn btn-sm btn-warning" onclick="labelCheckupFailed(${job.id})" title="Mark these ad groups to exclude from future checkups">Label Failed</button>` : ''}
                         ${job.status === 'completed' || job.status === 'paused' ? `<button class="btn btn-sm btn-danger" onclick="deleteJobById(${job.id})">Delete</button>` : ''}
                         <a href="/api/thema-ads/jobs/${job.id}/plan-csv" class="btn btn-sm btn-primary" title="Download uploaded plan">Plan CSV</a>
                         ${job.successful_items > 0 ? `<a href="/api/thema-ads/jobs/${job.id}/successful-items-csv" class="btn btn-sm btn-success" title="Download successful items">Success CSV</a>` : ''}
@@ -362,6 +363,34 @@ async function deleteJobById(jobId) {
         }
     } catch (error) {
         alert('Error deleting job: ' + error.message);
+    }
+}
+
+async function labelCheckupFailed(jobId) {
+    if (!confirm('This will label all ad groups in this repair job with THEMES_CHECKUP_FAILED to exclude them from future checkup runs. Continue?')) {
+        return;
+    }
+
+    try {
+        const formData = new FormData();
+        formData.append('job_ids', jobId);
+
+        const response = await fetch('/api/thema-ads/label-checkup-failed', {
+            method: 'POST',
+            body: formData
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+            alert('Error: ' + (result.detail || 'Unknown error'));
+            return;
+        }
+
+        alert(`Success!\n\nLabel: ${result.label_applied}\nAd groups found: ${result.total_ad_groups_found}\nAd groups labeled: ${result.total_labeled}\nCustomers processed: ${result.customers_processed}`);
+        refreshJobs();
+    } catch (error) {
+        alert('Error labeling ad groups: ' + error.message);
     }
 }
 

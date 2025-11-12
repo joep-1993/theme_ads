@@ -2287,3 +2287,159 @@ async def label_failed_ad_groups(
     except Exception as e:
         logger.error(f"Failed to label ad groups: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/thema-ads/label-checkup-failed")
+async def label_checkup_failed_ad_groups(
+    background_tasks: BackgroundTasks = None,
+    job_ids: str = Form(...)
+):
+    """
+    Label ad groups from repair jobs with THEMES_CHECKUP_FAILED label.
+    This prevents them from being processed in future checkup runs.
+
+    These are ad groups that:
+    - Had DONE labels but no corresponding themed ads
+    - Are now in repair jobs that are failing
+
+    Args:
+        job_ids: Comma-separated job IDs (e.g., '479,480')
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        job_id_list = [int(x.strip()) for x in job_ids.split(',')]
+        logger.info(f"Labeling checkup-failed ad groups for jobs={job_id_list}")
+
+        # Get ALL ad groups from these repair jobs (not just failed ones)
+        from backend.database import get_db_connection
+        import psycopg2.extras
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        cur.execute("""
+            SELECT DISTINCT customer_id, ad_group_id
+            FROM thema_ads_job_items
+            WHERE job_id = ANY(%s)
+            ORDER BY customer_id, ad_group_id
+        """, (job_id_list,))
+
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            return {
+                "status": "no_items_found",
+                "message": "No ad groups found in specified jobs",
+                "total_labeled": 0
+            }
+
+        # Group by customer
+        from collections import defaultdict
+        by_customer = defaultdict(list)
+        for row in rows:
+            by_customer[row['customer_id']].append(row['ad_group_id'])
+
+        total_ad_groups = len(rows)
+        logger.info(f"Found {total_ad_groups} ad groups across {len(by_customer)} customers")
+
+        # Load Google Ads client
+        from pathlib import Path
+        from dotenv import load_dotenv
+
+        env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+        if not env_path.exists():
+            raise HTTPException(status_code=500, detail="Google Ads credentials not configured")
+
+        load_dotenv(env_path)
+
+        from config import load_config_from_env
+        from google_ads_client import initialize_client
+
+        config = load_config_from_env()
+        client = initialize_client(config.google_ads)
+
+        # Use generic checkup failure label
+        checkup_failed_label = "THEMES_CHECKUP_FAILED"
+
+        logger.info(f"Applying label: {checkup_failed_label}")
+
+        # Label ad groups for each customer
+        ga_service = client.get_service("GoogleAdsService")
+        label_service = client.get_service("LabelService")
+        ad_group_label_service = client.get_service("AdGroupLabelService")
+
+        total_labeled = 0
+
+        for customer_id, ad_group_ids in by_customer.items():
+            try:
+                logger.info(f"Processing customer {customer_id}: {len(ad_group_ids)} ad groups")
+
+                # Ensure label exists
+                label_query = f"SELECT label.resource_name FROM label WHERE label.name = '{checkup_failed_label}' LIMIT 1"
+                label_resource = None
+
+                try:
+                    label_response = ga_service.search(customer_id=customer_id, query=label_query)
+                    for row in label_response:
+                        label_resource = row.label.resource_name
+                        break
+                except:
+                    pass
+
+                if not label_resource:
+                    # Create label
+                    logger.info(f"  Creating label '{checkup_failed_label}'")
+                    label_operation = client.get_type("LabelOperation")
+                    label = label_operation.create
+                    label.name = checkup_failed_label
+
+                    response = label_service.mutate_labels(
+                        customer_id=customer_id,
+                        operations=[label_operation]
+                    )
+                    label_resource = response.results[0].resource_name
+
+                # Apply label to ad groups in batches
+                operations = []
+                for ag_id in ad_group_ids:
+                    operation = client.get_type("AdGroupLabelOperation")
+                    ad_group_label = operation.create
+                    ad_group_label.ad_group = ga_service.ad_group_path(customer_id, ag_id)
+                    ad_group_label.label = label_resource
+                    operations.append(operation)
+
+                # Batch in chunks of 5000
+                BATCH_SIZE = 5000
+                for i in range(0, len(operations), BATCH_SIZE):
+                    batch = operations[i:i + BATCH_SIZE]
+                    try:
+                        response = ad_group_label_service.mutate_ad_group_labels(
+                            customer_id=customer_id,
+                            operations=batch,
+                            partial_failure=True  # Continue even if some fail (e.g., already labeled)
+                        )
+                        total_labeled += len(response.results)
+                        logger.info(f"  Labeled {len(response.results)} ad groups")
+                    except Exception as e:
+                        logger.error(f"  Error labeling batch: {e}")
+
+            except Exception as e:
+                logger.error(f"Error processing customer {customer_id}: {e}")
+                continue
+
+        return {
+            "status": "completed",
+            "label_applied": checkup_failed_label,
+            "total_ad_groups_found": total_ad_groups,
+            "total_labeled": total_labeled,
+            "customers_processed": len(by_customer)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to label checkup-failed ad groups: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

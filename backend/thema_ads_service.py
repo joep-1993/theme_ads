@@ -802,8 +802,8 @@ class ThemaAdsService:
                 logger.info(f"[{customer_id}] Auditing {len(themes_to_audit)} themes in bulk...")
                 stats['customers_processed'] += 1
 
-                # Step 1: Get all DONE labels, theme labels, and audit tracking label
-                all_labels_to_find = ['THEMES_CHECK_DONE']  # Audit tracking label
+                # Step 1: Get all DONE labels, theme labels, audit tracking label, and failure label
+                all_labels_to_find = ['THEMES_CHECK_DONE', 'THEMES_CHECKUP_FAILED']  # Audit tracking label + failure label
                 for theme in themes_to_audit:
                     theme_label, done_label = THEMES[theme]
                     all_labels_to_find.extend([theme_label, done_label])
@@ -842,6 +842,7 @@ class ThemaAdsService:
                         logger.warning(f"[{customer_id}] Warning: Could not create {audit_label_name} label: {e}")
 
                 audit_label_resource = label_resources.get(audit_label_name)
+                checkup_failed_label_resource = label_resources.get('THEMES_CHECKUP_FAILED')
 
                 # Build theme-specific mappings
                 theme_mappings = {}
@@ -882,6 +883,25 @@ class ThemaAdsService:
                             logger.info(f"[{customer_id}] Found {len(ad_groups_already_audited)} ad groups already audited (will skip)")
                     except Exception as e:
                         logger.warning(f"[{customer_id}] Warning: Could not query already-audited ad groups: {e}")
+
+                # Step 1.6: Find ad groups with THEMES_CHECKUP_FAILED label to skip
+                ad_groups_checkup_failed = set()
+                if checkup_failed_label_resource:
+                    try:
+                        failed_query = f"""
+                            SELECT ad_group.resource_name
+                            FROM ad_group_label
+                            WHERE ad_group_label.label = '{checkup_failed_label_resource}'
+                            AND campaign.name LIKE 'HS/%'
+                        """
+                        failed_response = ga_service.search(customer_id=customer_id, query=failed_query)
+                        for row in failed_response:
+                            ad_groups_checkup_failed.add(row.ad_group.resource_name)
+
+                        if ad_groups_checkup_failed:
+                            logger.info(f"[{customer_id}] Found {len(ad_groups_checkup_failed)} ad groups with checkup-failed label (will skip)")
+                    except Exception as e:
+                        logger.warning(f"[{customer_id}] Warning: Could not query checkup-failed ad groups: {e}")
 
                 # Step 2: Get all ad groups with ANY of the DONE labels (HS/ campaigns only)
                 done_resources = [tm['done_label_resource'] for tm in theme_mappings.values()]
@@ -944,8 +964,18 @@ class ThemaAdsService:
                             stats['ad_groups_skipped_already_audited'] += skipped_count
                             logger.info(f"[{customer_id}] Theme {theme}: Skipped {skipped_count} already-audited ad groups")
 
+                    # Filter out checkup-failed ad groups (always skip these)
+                    if ad_groups_checkup_failed:
+                        before_filter = len(ad_groups_list)
+                        ad_groups_list = [ag for ag in ad_groups_list
+                                          if ag['resource'] not in ad_groups_checkup_failed]
+                        skipped_failed = before_filter - len(ad_groups_list)
+                        if skipped_failed > 0:
+                            stats['ad_groups_skipped_already_audited'] += skipped_failed  # Reuse counter
+                            logger.info(f"[{customer_id}] Theme {theme}: Skipped {skipped_failed} checkup-failed ad groups")
+
                     if not ad_groups_list:
-                        logger.info(f"[{customer_id}] Theme {theme}: All ad groups already audited - skipping")
+                        logger.info(f"[{customer_id}] Theme {theme}: All ad groups filtered out - skipping")
                         continue
 
                     theme_label = theme_mappings[theme]['theme_label']

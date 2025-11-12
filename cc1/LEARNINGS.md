@@ -2727,5 +2727,70 @@ docker exec -d theme_ads-app-1 bash -c \
   "python3 /app/thema_ads_optimized/remove_duplicates_standalone.py --live --workers 3 > /tmp/remove_duplicates_full.log 2>&1"
 ```
 
+## Checkup Failed Label System (2025-11-12)
+
+**Problem**: Checkup jobs found 3,942 ad groups with DONE labels but no themed ads. These were creating repair jobs that failed at 98.8% rate due to:
+- Google Ads policy violations (prohibited symbols, broken destinations)
+- Ads previously removed/disapproved by Google
+- No way to exclude them from future checkup runs
+
+**Solution**: Implemented THEMES_CHECKUP_FAILED label system to permanently exclude problematic ad groups.
+
+**Implementation**:
+1. **New API Endpoint** (`backend/main.py:2292`):
+   ```python
+   @app.post("/api/thema-ads/label-checkup-failed")
+   async def label_checkup_failed_ad_groups(job_ids: str = Form(...))
+   ```
+   - Labels ALL ad groups from repair jobs with `THEMES_CHECKUP_FAILED`
+   - Works across multiple customers in batches of 5,000
+   - Uses `partial_failure=True` to continue even if some already labeled
+
+2. **Updated Checkup Logic** (`backend/thema_ads_service.py:805-904`):
+   - Queries for `THEMES_CHECKUP_FAILED` label alongside other tracking labels
+   - Automatically excludes ad groups with this label from all checkup operations
+   - Logs skipped count for visibility
+
+3. **Frontend Integration** (`frontend/js/thema-ads.js:369-395`):
+   - "Label Failed" button added to repair job rows
+   - Shows only for repair jobs (identified by `is_repair_job` flag)
+   - Confirmation dialog with clear explanation
+   - Success summary with label counts
+
+**Key Features**:
+- **Permanent Exclusion**: Once labeled, ad groups never appear in checkup results
+- **Batch Processing**: Handles thousands of ad groups efficiently
+- **Cross-Customer**: Works across all customers in a repair job
+- **Idempotent**: Safe to run multiple times (partial_failure mode)
+
+**Usage**:
+```bash
+# Via Frontend
+# 1. Navigate to http://localhost:8002/static/thema-ads.html
+# 2. Find repair job in jobs list
+# 3. Click "Label Failed" button
+# 4. Confirm when prompted
+
+# Via API
+curl -X POST http://localhost:8002/api/thema-ads/label-checkup-failed \
+  -F "job_ids=479"
+```
+
+**Results**:
+- Excluded 3,942 ad groups across 9 customers from future checkups
+- Prevents wasted API calls on permanently failed ad groups
+- Reduces noise in checkup reports
+- Label: `THEMES_CHECKUP_FAILED` visible in Google Ads UI
+
+**Files Modified**:
+- `backend/main.py` - New endpoint `/api/thema-ads/label-checkup-failed`
+- `backend/thema_ads_service.py` - Updated `checkup_ad_groups()` to skip labeled groups
+- `frontend/js/thema-ads.js` - Added `labelCheckupFailed()` function and UI button
+
+**Related Labels**:
+- `THEMES_CHECK_DONE` - Successfully validated ad groups (have themed ads)
+- `THEMES_CHECKUP_FAILED` - Permanently failed ad groups (cannot be processed)
+- `THEME_XX_DONE` - Individual theme completion labels (e.g., THEME_BF_DONE)
+
 ---
-_Last updated: 2025-11-02_
+_Last updated: 2025-11-12_
