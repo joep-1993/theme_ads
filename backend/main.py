@@ -1941,6 +1941,7 @@ async def activate_ads_v2_endpoint(
     async def run_activation():
         """Background task to run activation"""
         try:
+            print("[ACTIVATE-V2] Background task started", flush=True)
             from pathlib import Path
             from dotenv import load_dotenv
 
@@ -1952,6 +1953,7 @@ async def activate_ads_v2_endpoint(
             from config import load_config_from_env
             from google_ads_client import initialize_client
 
+            print("[ACTIVATE-V2] Initializing client in background task...", flush=True)
             logger.info("[ACTIVATE-V2] Initializing client in background task...")
             config = load_config_from_env()
             client = initialize_client(config.google_ads)
@@ -1966,10 +1968,14 @@ async def activate_ads_v2_endpoint(
 
             logger.info(f"[ACTIVATE-V2] Completed: {result}")
         except Exception as e:
+            print(f"[ACTIVATE-V2] Failed: {e}", flush=True)
             logger.error(f"[ACTIVATE-V2] Failed: {e}", exc_info=True)
+            import traceback
+            traceback.print_exc()
 
-    # Add to background tasks
-    background_tasks.add_task(run_activation)
+    # Add to background tasks - use asyncio.create_task for async functions
+    import asyncio
+    asyncio.create_task(run_activation())
 
     logger.info(f"[ACTIVATE-V2] Activation queued for {customer_ids or 'all customers'} with parallel_workers={parallel_workers}")
 

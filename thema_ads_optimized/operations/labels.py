@@ -74,6 +74,11 @@ async def label_ads_batch(
         if not ad_label_pairs:
             return 0
 
+        # DEDUPLICATE: Remove duplicate ad-label pairs to avoid "Cannot mutate the same resource twice" error
+        unique_pairs = list(set(ad_label_pairs))
+        if len(unique_pairs) < len(ad_label_pairs):
+            logger.info(f"Deduplicated ad labels: {len(ad_label_pairs)} -> {len(unique_pairs)} pairs")
+
         service = client.get_service("AdGroupAdLabelService")
         total_labeled = 0
 
@@ -81,8 +86,8 @@ async def label_ads_batch(
         BATCH_LIMIT = 10000
 
         # Process in chunks
-        for chunk_start in range(0, len(ad_label_pairs), BATCH_LIMIT):
-            chunk = ad_label_pairs[chunk_start:chunk_start + BATCH_LIMIT]
+        for chunk_start in range(0, len(unique_pairs), BATCH_LIMIT):
+            chunk = unique_pairs[chunk_start:chunk_start + BATCH_LIMIT]
             operations = []
 
             for ad_resource, label_resource in chunk:
@@ -125,6 +130,11 @@ async def label_ad_groups_batch(
         if not ad_group_label_pairs:
             return 0
 
+        # DEDUPLICATE: Remove duplicate ad group-label pairs to avoid "Cannot mutate the same resource twice" error
+        unique_pairs = list(set(ad_group_label_pairs))
+        if len(unique_pairs) < len(ad_group_label_pairs):
+            logger.info(f"Deduplicated ad group labels: {len(ad_group_label_pairs)} -> {len(unique_pairs)} pairs")
+
         service = client.get_service("AdGroupLabelService")
         total_labeled = 0
 
@@ -132,8 +142,8 @@ async def label_ad_groups_batch(
         BATCH_LIMIT = 10000
 
         # Process in chunks
-        for chunk_start in range(0, len(ad_group_label_pairs), BATCH_LIMIT):
-            chunk = ad_group_label_pairs[chunk_start:chunk_start + BATCH_LIMIT]
+        for chunk_start in range(0, len(unique_pairs), BATCH_LIMIT):
+            chunk = unique_pairs[chunk_start:chunk_start + BATCH_LIMIT]
             operations = []
 
             for ag_resource, label_resource in chunk:

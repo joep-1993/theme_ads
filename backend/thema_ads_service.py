@@ -2537,6 +2537,8 @@ class ThemaAdsService:
                         stats['customers_processed'] += 1
                     return
 
+                logger.info(f"[{customer_id}] Found label {theme_label_name} with ID: {theme_label_id}")
+
                 # Step 1: Direct query for ALL theme ads by querying FROM ad_group_ad_label
                 # This is the KEY optimization - query FROM the label relationship!
                 theme_ads_query = f"""
@@ -2555,6 +2557,8 @@ class ThemaAdsService:
                 # Organize theme ads by ad group
                 theme_ads_by_ag = {}  # ad_group_resource -> list of ad dicts
                 ad_groups_with_theme = set()
+
+                logger.debug(f"[{customer_id}] Theme ads query: {theme_ads_query}")
 
                 try:
                     response = ga_service.search(customer_id=customer_id, query=theme_ads_query)

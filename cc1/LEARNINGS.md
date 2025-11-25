@@ -3024,5 +3024,73 @@ curl -X POST http://localhost:8002/api/thema-ads/label-checkup-failed \
 - `THEMES_CHECKUP_FAILED` - Permanently failed ad groups (cannot be processed)
 - `THEME_XX_DONE` - Individual theme completion labels (e.g., THEME_BF_DONE)
 
+## Label Deduplication Fix (2025-11-25)
+
+**Problem**: Ad labeling operations failing with "Cannot mutate the same resource twice in one request" error.
+
+**Root Cause**: The `label_ads_batch()` and `label_ad_groups_batch()` functions didn't deduplicate input pairs before creating API operations. Duplicate ad-label pairs caused the batch to fail.
+
+**Symptoms**:
+```
+MutateAdGroupAdLabels, FaultMessage: Cannot mutate the same resource twice in one request
+MutateAdGroupLabels, FaultMessage: Cannot mutate the same resource twice in one request
+```
+
+**Impact**:
+- New ads created but NOT labeled with theme labels (THEME_BF, etc.)
+- V2 activation couldn't find ads because they lacked theme labels
+- Appeared as if labeling succeeded but labels weren't applied
+
+**Solution**: Added deduplication at the start of both labeling functions:
+```python
+# DEDUPLICATE: Remove duplicate ad-label pairs
+unique_pairs = list(set(ad_label_pairs))
+if len(unique_pairs) < len(ad_label_pairs):
+    logger.info(f"Deduplicated ad labels: {len(ad_label_pairs)} -> {len(unique_pairs)} pairs")
+```
+
+**Files Modified**:
+- `thema_ads_optimized/operations/labels.py` - Added deduplication to `label_ads_batch()` and `label_ad_groups_batch()`
+
+## Background Task Execution Fix (2025-11-25)
+
+**Problem**: FastAPI `BackgroundTasks.add_task()` not properly executing async coroutines.
+
+**Solution**: Changed to `asyncio.create_task()` for async functions:
+```python
+# OLD (didn't work reliably)
+background_tasks.add_task(run_activation)
+
+# NEW (works correctly)
+asyncio.create_task(run_activation())
+```
+
+**Files Modified**:
+- `backend/main.py` - Updated `activate_ads_v2_endpoint()`
+
+## Project Structure Reorganization (2025-11-25)
+
+**Changes Made**:
+- Created `logs/` - moved all `.log` files and `removal_progress*.txt`
+- Created `docs/` - moved documentation markdown files
+- Created `scripts/` - moved active scripts
+- Created `scripts/archive/` - moved 24 old utility scripts
+- Removed `thema_ads_project/` - old duplicate folder
+- Removed duplicate `run_activation.py` from root
+
+**New Structure**:
+```
+theme_ads/
+├── backend/          # FastAPI service
+├── cc1/              # CC1 documentation
+├── docs/             # Project documentation
+├── frontend/         # Web interface
+├── logs/             # Log files (gitignored)
+├── scripts/          # Active scripts + archive
+├── thema_ads_optimized/  # CLI automation
+├── themes/           # Theme configurations
+└── ...
+```
+
 ---
-_Last updated: 2025-11-12_
+_Last updated: 2025-11-25_

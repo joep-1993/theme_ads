@@ -26,9 +26,6 @@ Thumbs.db
 # Docker
 postgres_data/
 
-# Secrets
-thema_ads_project/thema_ads
-
 # Data files
 *.xlsx
 *.xls

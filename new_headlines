@@ -1,4 +1,0 @@
-  - "Bestel {KeyWord:Vandaag}!"
-  - "{KeyWord:Deal} Shop nu!"
-  - "{KeyWord:Sale} – {COUNTDOWN(...)}"
-  - "{KeyWord:Aanbieding} Nog {COUNTDOWN(...)}"
