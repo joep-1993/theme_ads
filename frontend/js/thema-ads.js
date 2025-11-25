@@ -954,7 +954,19 @@ async function activateAds() {
 
         const data = await response.json();
 
-        if (response.ok && data.status === 'completed') {
+        if (response.ok && data.status === 'accepted') {
+            // New BackgroundTasks pattern - activation running in background
+            resultDiv.innerHTML = `
+                <div class="alert alert-info">
+                    <h5><i class="fas fa-spinner fa-spin"></i> Activation Started!</h5>
+                    <hr>
+                    <p>${data.message}</p>
+                    <p><strong>Processing ${customerIds ? customerIds.length : 'all'} customers with ${parallelWorkers} parallel workers.</strong></p>
+                    <p class="mb-0"><small>The activation is running in the background. Check the logs with: <code>docker logs theme_ads-app-1 --tail 100</code></small></p>
+                </div>
+            `;
+        } else if (response.ok && data.status === 'completed') {
+            // Legacy pattern - immediate completion (fallback)
             const stats = data.stats;
 
             let resultHTML = '<div class="alert alert-success">';
