@@ -467,6 +467,36 @@ Successfully added real-time progress visualization to activation UI **with zero
 - **Best Practice**: Provide separate status endpoint or websocket for progress updates
 - **Result**: Frontend gets instant feedback, can poll for progress while work continues
 
+### Frontend Not Updated for BackgroundTasks Pattern (2025-11-24)
+- **Problem**: Frontend not handling "accepted" status after backend converted to BackgroundTasks
+- **Symptoms**: Frontend shows error or incorrect message when activation triggered, despite backend processing successfully
+- **Root Cause**: Backend converted to return `{"status": "accepted"}` but frontend still checking for `{"status": "completed"}`
+- **Impact**: User confusion - backend working correctly but frontend showing error, no feedback that activation started
+- **Solution**: Update frontend handler to check for both status codes (frontend/js/thema-ads.js:957-967):
+  ```javascript
+  const data = await response.json();
+
+  if (response.ok && data.status === 'accepted') {
+      // New BackgroundTasks pattern - activation running in background
+      resultDiv.innerHTML = `
+          <div class="alert alert-info">
+              <h5><i class="fas fa-spinner fa-spin"></i> Activation Started!</h5>
+              <hr>
+              <p>${data.message}</p>
+              <p><strong>Processing ${customerIds ? customerIds.length : 'all'} customers with ${parallelWorkers} parallel workers.</strong></p>
+              <p class="mb-0"><small>The activation is running in the background. Check the logs with: <code>docker logs theme_ads-app-1 --tail 100</code></small></p>
+          </div>
+      `;
+  } else if (response.ok && data.status === 'completed') {
+      // Legacy pattern - immediate completion (fallback)
+      // ... existing code ...
+  }
+  ```
+- **Key Insight**: When changing API response format, must update ALL consumers (frontend, CLI tools, docs)
+- **Pattern**: Check for new status code first, keep legacy fallback for backwards compatibility
+- **Best Practice**: When converting endpoints to background tasks, audit all callers and update simultaneously
+- **Result**: Frontend now shows informative message that activation started, directs user to logs for progress
+
 ### Database Connection Requires DATABASE_URL (2025-10-24)
 - **Problem**: PostgreSQL connection fails with "no password supplied" error
 - **Error**: `psycopg2.OperationalError: connection to server at "db" (172.20.0.2), port 5432 failed: fe_sendauth: no password supplied`
