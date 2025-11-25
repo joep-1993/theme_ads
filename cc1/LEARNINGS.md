@@ -297,9 +297,175 @@ Successfully added real-time progress visualization to activation UI **with zero
      WHERE label.resource_name IN (list_of_label_resources)
      ```
   3. **Step 3**: Map resources to names in application code
-- **Performance**: Still achieves 50x speedup with batching despite two-step approach
-- **Files**: remove_duplicate_ads.py batch_fetch_ad_labels() lines 74-121
-- **Key Insight**: GAQL is not SQL - treat it as a limited query language designed for simple filtering
+
+### V2 Activation RSA 3-Ad Limit Violation (2025-11-24)
+- **Problem**: Script enabling ALL theme ads per ad group instead of only ONE, exceeding Google's 3-ad RSA limit
+- **Error**: `RESOURCE_LIMIT: The request would cause a limit on the number of allowed resources of this type to be exceeded` with existing_count: 1 or 2
+- **Symptoms**: Activation attempting to enable 2-3 theme ads in same ad group, hitting 3-ad limit when combined with existing enabled ads
+- **Root Cause**: Missing `break` statement after enabling first PAUSED theme ad - loop continued enabling all matching theme ads
+- **Impact**: CRITICAL - activation failed for ad groups with multiple theme ads (e.g., ad group has THEME_BF + THEME_CM ads)
+- **Solution**: Add `break` statement after enabling first theme ad (backend/thema_ads_service.py:2690):
+  ```python
+  # Enable ONLY ONE theme ad (the first PAUSED one) in this ad group
+  for theme_ad in theme_ads:
+      if theme_ad['status'] == 'PAUSED':
+          operation = client.get_type("AdGroupAdOperation")
+          ad_group_ad = operation.update
+          ad_group_ad.resource_name = theme_ad['resource']
+          ad_group_ad.status = client.enums.AdGroupAdStatusEnum.ENABLED
+          operation.update_mask.paths.append('status')
+          enable_operations.append(operation)
+          needs_changes = True
+          break  # CRITICAL: Only enable ONE theme ad per ad group
+  ```
+- **Key Insight**: Must pause ALL other theme ads FIRST, then enable only ONE target theme ad to stay within RSA 3-ad limit
+- **Pattern**: Always enforce business rules (1 active theme ad per group) at operation level, not just query level
+- **Result**: Activation now correctly enables exactly one theme ad per ad group
+
+### GAQL Subquery Syntax Error in V2 Activation (2025-11-24)
+- **Problem**: Query failing with "invalid value" error when trying to use subquery in WHERE/IN clause
+- **Error**: `BAD_VALUE: invalid value label.resource_name` when using `WHERE ad_group_ad_label.label IN (SELECT label.resource_name FROM label ...)`
+- **Symptoms**: V2 activation query for other theme ads failing with syntax error
+- **Root Cause**: Google Ads API doesn't support subqueries in WHERE clauses - attempting SQL-style nested SELECT
+- **Invalid Syntax**:
+  ```sql
+  -- ❌ This fails - subqueries not supported
+  SELECT ad_group_ad.ad_group, ad_group_ad.resource_name
+  FROM ad_group_ad
+  WHERE ad_group_ad_label.label IN (
+      SELECT label.resource_name
+      FROM label
+      WHERE label.name IN ('THEME_BF', 'THEME_SK', ...)
+  )
+  ```
+- **Solution**: Query FROM ad_group_ad_label with direct label filtering:
+  ```sql
+  -- ✅ This works - direct filtering on label names
+  SELECT ad_group_ad.ad_group, ad_group_ad.resource_name, ad_group_ad.status, label.name
+  FROM ad_group_ad_label
+  WHERE ad_group_ad.ad_group IN ('{ag_resources_str}')
+  AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+  AND ad_group_ad.status != REMOVED
+  AND label.name IN ('THEME_BF', 'THEME_SK', 'THEME_KERSTMIS', ...)
+  ```
+- **Key Insight**: GAQL has limited SQL-like syntax - no subqueries, must use direct filtering
+- **Files Modified**: backend/thema_ads_service.py:2605-2617 (all_theme_ads_query)
+- **Related**: This is part of the ad-first query optimization using ad_group_ad_label table
+- **Result**: Query now works correctly, retrieving all theme ads for selective pausing
+
+### ID_EXISTS_IN_MULTIPLE_MUTATES Error with V2 Activation (2025-11-24)
+- **Problem**: "Cannot mutate the same resource twice in one request" error during batch operations
+- **Error**: `ID_EXISTS_IN_MULTIPLE_MUTATES: This customer, campaign, ad group, or ad ID exists in multiple mutate operations in the request`
+- **Symptoms**: Activation failing when trying to pause theme ads, same ad resource appearing in duplicate operations
+- **Root Cause**: Ads with multiple theme labels appear multiple times in query results from ad_group_ad_label
+  - Example: Ad with both THEME_SK and THEME_CM labels → appears twice in query (once per label)
+  - Script iterated over all results, creating duplicate pause operations for same ad
+- **Impact**: CRITICAL - batch mutations failing for customers with ads having multiple theme labels
+- **Solution**: Use dict storage instead of list for deduplication by ad resource_name (backend/thema_ads_service.py:2595, 2633-2642):
+  ```python
+  # DEDUPLICATION: Use dict to prevent duplicate ad resources
+  other_theme_ads_by_ag = {}  # ad_group_resource -> {ad_resource -> ad_info}
+
+  for row in response:
+      ag_res = row.ad_group_ad.ad_group
+      ad_res = row.ad_group_ad.resource_name
+      ad_status = row.ad_group_ad.status.name
+      label_name = row.label.name
+
+      if label_name == theme_label_name:
+          continue
+
+      # DEDUPLICATION: Use dict to store unique ads by resource_name
+      if ag_res not in other_theme_ads_by_ag:
+          other_theme_ads_by_ag[ag_res] = {}
+
+      # Only store if not already present (prevent duplicate operations)
+      if ad_res not in other_theme_ads_by_ag[ag_res]:
+          other_theme_ads_by_ag[ag_res][ad_res] = {
+              'resource': ad_res,
+              'status': ad_status,
+              'label': label_name
+          }
+
+  # Then iterate over dict values when building operations
+  for other_ad in other_theme_ads_by_ag[ag_res].values():
+      # ... create pause operation
+  ```
+- **Key Insight**: When querying FROM ad_group_ad_label, each label relationship creates a row - ads with N labels appear N times
+- **Pattern**: Always deduplicate results from join tables using dict/set with resource_name as key
+- **Result**: Each ad now processed exactly once, eliminating duplicate operation errors
+
+### Frontend Hanging on Account Plan Upload (2025-11-24)
+- **Problem**: Frontend stuck/frozen when uploading activation plan with large number of customers
+- **Symptoms**: Browser becomes unresponsive after upload, spinner keeps spinning indefinitely
+- **Root Cause**: Backend returned entire `plan_data` dictionary (potentially thousands of customer→theme entries) in JSON response
+- **Impact**: Browser freezing when trying to render large JSON response, poor user experience
+- **Solution**: Remove `plan_data` from API response body (backend/main.py:895):
+  ```python
+  # Before - returns large dataset
+  return {
+      "status": "success",
+      "message": f"Stored activation plan with {count} customers",
+      "plan_data": plan_data,  # ❌ Can be thousands of entries
+      "count": count
+  }
+
+  # After - minimal response
+  return {
+      "status": "success",
+      "message": f"Stored activation plan with {count} customers",
+      "count": count  # ✅ Only essential data
+  }
+  ```
+- **Key Insight**: API responses should contain minimal data; avoid returning entire datasets that will be discarded
+- **Pattern**: Return only what frontend needs (status, count, message) not full data payload
+- **Best Practice**: Use pagination or separate query endpoints for large datasets
+- **Result**: Frontend now loads instantly after upload, responsive UI
+
+### HTTP Endpoint Hanging with Long-Running Operations (2025-11-24)
+- **Problem**: HTTP endpoint hanging/timing out when activation takes several minutes
+- **Symptoms**: Frontend waits 5+ minutes for activation endpoint, eventually times out with no response
+- **Root Cause**: Google Ads client initialization and activation process blocking HTTP request/response cycle
+- **Impact**: Poor user experience, frontend cannot show progress, timeouts cause confusion
+- **Solution**: Convert endpoint to use FastAPI BackgroundTasks pattern (backend/main.py:1921-1981):
+  ```python
+  @app.post("/api/thema-ads/activate-v2")
+  async def activate_ads_v2_endpoint(
+      background_tasks: BackgroundTasks,
+      customer_ids: List[str] = Query(None),
+      reset_labels: bool = False,
+      parallel_workers: int = 5
+  ):
+      async def run_activation():
+          try:
+              from pathlib import Path
+              from dotenv import load_dotenv
+              env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+              if env_path.exists():
+                  load_dotenv(env_path)
+
+              from config import load_config_from_env
+              from google_ads_client import initialize_client
+
+              config = load_config_from_env()
+              client = initialize_client(config.google_ads)
+
+              result = await thema_ads_service.activate_ads_per_plan_v2(
+                  client=client,
+                  customer_ids=customer_ids,
+                  parallel_workers=parallel_workers,
+                  reset_labels=reset_labels
+              )
+          except Exception as e:
+              logger.error(f"[ACTIVATE-V2] Failed: {e}", exc_info=True)
+
+      background_tasks.add_task(run_activation)
+      return {"status": "accepted", "message": "Activation started in background..."}
+  ```
+- **Key Insight**: Long-running operations (>30s) should never block HTTP responses - use background tasks
+- **Pattern**: Endpoint returns immediately with "accepted" status, work continues asynchronously
+- **Best Practice**: Provide separate status endpoint or websocket for progress updates
+- **Result**: Frontend gets instant feedback, can poll for progress while work continues
 
 ### Database Connection Requires DATABASE_URL (2025-10-24)
 - **Problem**: PostgreSQL connection fails with "no password supplied" error
@@ -1083,6 +1249,42 @@ label_service.mutate_labels(
 - **Use Case**: Resetting SD_CHECKED labels across 129 customer accounts with 240k+ ad groups
 - **Performance**: 1 call per customer vs thousands of calls to remove individual ad group labels
 - **Script**: `delete_sd_checked_labels.py` - finds and deletes SD_CHECKED label from each customer account
+
+### Reset Labels Functionality Pattern (2025-11-24)
+- **Purpose**: Remove ACTIVATION_DONE labels from customers to allow reprocessing when activation plan changes
+- **Use Case**: When activation plan is updated with different themes for same customers, old ACTIVATION_DONE labels block reprocessing
+- **Implementation**: backend/database.py:268-296 (store_activation_plan with reset_labels parameter)
+- **Pattern**:
+  ```python
+  # In store_activation_plan function
+  if reset_labels and plan_data:
+      logger.info(f"Resetting ACTIVATION_DONE labels for {len(plan_data)} customers")
+      try:
+          # Load environment variables
+          env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+          if env_path.exists():
+              load_dotenv(env_path)
+
+          # Initialize Google Ads client
+          from config import load_config_from_env
+          from google_ads_client import initialize_client
+          config = load_config_from_env()
+          client = initialize_client(config.google_ads)
+
+          # Remove ACTIVATION_DONE labels from each customer
+          for customer_id in plan_data.keys():
+              try:
+                  from label_manager import remove_label_from_customer
+                  removed = remove_label_from_customer(client, customer_id, "ACTIVATION_DONE")
+                  logger.info(f"  Customer {customer_id}: Removed ACTIVATION_DONE from {removed} ad groups")
+              except Exception as e:
+                  logger.warning(f"  Failed to reset labels for customer {customer_id}: {e}")
+      except Exception as e:
+          logger.warning(f"Failed to reset ACTIVATION_DONE labels: {e}")
+  ```
+- **Key Insight**: Label reset must happen within database transaction that updates activation plan to ensure consistency
+- **Best Practice**: Use remove_label_from_customer() utility which handles label lookup and batch removal
+- **Result**: Customers can be reprocessed with new activation plan after labels are reset
 
 ### CSV Encoding Issues
 - **Error**: `'utf-8' codec can't decode byte 0xe8 in position X: invalid continuation byte`

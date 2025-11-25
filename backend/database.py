@@ -265,6 +265,35 @@ def store_activation_plan(plan_data: dict, reset_labels: bool = False):
         conn.commit()
         logger.info(f"Stored activation plan with {len(plan_data)} customers")
 
+        # Reset ACTIVATION_DONE labels if requested
+        if reset_labels and plan_data:
+            logger.info(f"Resetting ACTIVATION_DONE labels for {len(plan_data)} customers")
+            try:
+                from pathlib import Path
+                from dotenv import load_dotenv
+
+                # Load environment variables
+                env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+                if env_path.exists():
+                    load_dotenv(env_path)
+
+                    from config import load_config_from_env
+                    from google_ads_client import initialize_client
+
+                    config = load_config_from_env()
+                    client = initialize_client(config.google_ads)
+
+                    # Remove ACTIVATION_DONE labels from ad groups
+                    for customer_id in plan_data.keys():
+                        try:
+                            from label_manager import remove_label_from_customer
+                            removed = remove_label_from_customer(client, customer_id, "ACTIVATION_DONE")
+                            logger.info(f"  Customer {customer_id}: Removed ACTIVATION_DONE from {removed} ad groups")
+                        except Exception as e:
+                            logger.warning(f"  Failed to reset labels for customer {customer_id}: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to reset ACTIVATION_DONE labels: {e}")
+
         return len(plan_data)
 
     finally:

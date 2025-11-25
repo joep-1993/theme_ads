@@ -892,7 +892,6 @@ async def upload_excel(
                 "status": "success",
                 "message": "Activation plan uploaded successfully",
                 "customers_in_plan": num_customers,
-                "plan_data": plan_data,
                 "reset_labels": reset_activation_labels
             }
 
@@ -1921,18 +1920,15 @@ async def activate_ads_optimized(
 
 @app.post("/api/thema-ads/activate-v2")
 async def activate_ads_v2_endpoint(
+    background_tasks: BackgroundTasks,
     customer_ids: List[str] = Query(None),
     reset_labels: bool = False,
     parallel_workers: int = 5
 ):
     """
-    V2: Ultra-fast AD-FIRST activation approach.
+    V2: Ultra-fast AD-FIRST activation approach - runs as background task.
 
-    Directly queries ads by label instead of querying all ad groups first.
-    This is 10-100x faster than the ad-group-first approach.
-
-    Performance: Queries only the exact ads needed (theme + original labeled ads)
-    instead of scanning all ad groups and filtering.
+    Returns immediately with accepted status. Check logs for progress.
 
     Args:
         customer_ids: Optional list of customer IDs to process (None = all in plan)
@@ -1942,40 +1938,47 @@ async def activate_ads_v2_endpoint(
     import logging
     logger = logging.getLogger(__name__)
 
-    logger.info(f"V2 (AD-FIRST) Activate ads parameters: customer_ids={customer_ids}, parallel={parallel_workers}, reset={reset_labels}")
+    async def run_activation():
+        """Background task to run activation"""
+        try:
+            from pathlib import Path
+            from dotenv import load_dotenv
 
-    try:
-        from pathlib import Path
-        from dotenv import load_dotenv
+            # Load environment
+            env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
+            if env_path.exists():
+                load_dotenv(env_path)
 
-        # Load environment variables
-        env_path = Path(__file__).parent.parent / "thema_ads_optimized" / ".env"
-        if env_path.exists():
-            load_dotenv(env_path)
-        else:
-            raise HTTPException(status_code=500, detail="Google Ads credentials not configured")
+            from config import load_config_from_env
+            from google_ads_client import initialize_client
 
-        from config import load_config_from_env
-        from google_ads_client import initialize_client
+            logger.info("[ACTIVATE-V2] Initializing client in background task...")
+            config = load_config_from_env()
+            client = initialize_client(config.google_ads)
 
-        config = load_config_from_env()
-        client = initialize_client(config.google_ads)
+            logger.info("[ACTIVATE-V2] Starting activation...")
+            result = await thema_ads_service.activate_ads_per_plan_v2(
+                client=client,
+                customer_ids=customer_ids,
+                parallel_workers=parallel_workers,
+                reset_labels=reset_labels
+            )
 
-        # Run V2 activation (integrated into thema_ads_service)
-        result = await thema_ads_service.activate_ads_per_plan_v2(
-            client=client,
-            customer_ids=customer_ids,
-            parallel_workers=parallel_workers,
-            reset_labels=reset_labels
-        )
+            logger.info(f"[ACTIVATE-V2] Completed: {result}")
+        except Exception as e:
+            logger.error(f"[ACTIVATE-V2] Failed: {e}", exc_info=True)
 
-        return result
+    # Add to background tasks
+    background_tasks.add_task(run_activation)
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"V2 (AD-FIRST) ad activation failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    logger.info(f"[ACTIVATE-V2] Activation queued for {customer_ids or 'all customers'} with parallel_workers={parallel_workers}")
+
+    return {
+        "status": "accepted",
+        "message": "Activation started in background. Check logs for progress.",
+        "customer_ids": customer_ids,
+        "parallel_workers": parallel_workers
+    }
 
 
 @app.post("/api/thema-ads/remove-duplicates")

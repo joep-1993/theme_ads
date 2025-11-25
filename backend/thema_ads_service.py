@@ -2588,66 +2588,63 @@ class ThemaAdsService:
                         stats['customers_processed'] += 1
                     return
 
-                # Step 2: Get THEMA_ORIGINAL label ID
-                original_label_query = """
-                    SELECT label.id
-                    FROM label
-                    WHERE label.name = 'THEMA_ORIGINAL'
-                """
-
-                original_label_id = None
-                try:
-                    response = ga_service.search(customer_id=customer_id, query=original_label_query)
-                    for row in response:
-                        original_label_id = row.label.id
-                        break
-                except Exception as e:
-                    logger.warning(f"[{customer_id}] THEMA_ORIGINAL label not found: {e}")
-
-                # Step 3: Query THEMA_ORIGINAL ads in those same ad groups using FROM ad_group_ad_label
+                # Step 2: Query ALL theme ads (including other themes we need to pause) in those same ad groups
+                # CRITICAL FIX: Query ALL theme ads, not just THEMA_ORIGINAL
                 # IMPORTANT: Batch the query to avoid FILTER_HAS_TOO_MANY_VALUES error
-                original_ads_by_ag = {}  # ad_group_resource -> [ad_resources]
-                if original_label_id:
-                    ad_groups_list = list(ad_groups_with_theme)
-                    BATCH_SIZE = 1000  # Google Ads API limit for IN clause values
+                # DEDUPLICATION: Use dict to prevent duplicate ad resources (ads with multiple labels appear multiple times)
+                other_theme_ads_by_ag = {}  # ad_group_resource -> {ad_resource -> ad_info}
+                ad_groups_list = list(ad_groups_with_theme)
+                BATCH_SIZE = 1000  # Google Ads API limit for IN clause values
 
-                    logger.info(f"[{customer_id}] Querying THEMA_ORIGINAL ads in {len(ad_groups_list)} ad groups (batched)...")
+                logger.info(f"[{customer_id}] Querying ALL theme ads (to pause) in {len(ad_groups_list)} ad groups (batched)...")
 
-                    for batch_idx in range(0, len(ad_groups_list), BATCH_SIZE):
-                        batch = ad_groups_list[batch_idx:batch_idx + BATCH_SIZE]
-                        ag_resources_str = "', '".join(batch)
+                for batch_idx in range(0, len(ad_groups_list), BATCH_SIZE):
+                    batch = ad_groups_list[batch_idx:batch_idx + BATCH_SIZE]
+                    ag_resources_str = "', '".join(batch)
 
-                        original_ads_query = f"""
-                            SELECT
-                                ad_group_ad.ad_group,
-                                ad_group_ad.resource_name,
-                                ad_group_ad.status
-                            FROM ad_group_ad_label
-                            WHERE ad_group_ad.ad_group IN ('{ag_resources_str}')
-                            AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
-                            AND ad_group_ad.status != REMOVED
-                            AND label.id = {original_label_id}
-                        """
+                    # Query ALL theme ads - CRITICAL FIX: Use FROM ad_group_ad_label for correct syntax
+                    all_theme_ads_query = f"""
+                        SELECT
+                            ad_group_ad.ad_group,
+                            ad_group_ad.resource_name,
+                            ad_group_ad.status,
+                            label.name
+                        FROM ad_group_ad_label
+                        WHERE ad_group_ad.ad_group IN ('{ag_resources_str}')
+                        AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
+                        AND ad_group_ad.status != REMOVED
+                        AND label.name IN ('THEME_BF', 'THEME_SK', 'THEME_KERSTMIS', 'THEME_CM', 'THEME_SD', 'THEME_VALENTIJN', 'THEME_PASEN', 'THEME_MOEDERDAG', 'THEME_VADERDAG', 'THEME_ZOMER', 'THEME_TERUG_NAAR_SCHOOL', 'THEME_HALLOWEEN', 'THEMA_ORIGINAL')
+                    """
 
-                        try:
-                            response = ga_service.search(customer_id=customer_id, query=original_ads_query)
-                            for row in response:
-                                ag_res = row.ad_group_ad.ad_group
-                                ad_res = row.ad_group_ad.resource_name
-                                ad_status = row.ad_group_ad.status.name
+                    try:
+                        response = ga_service.search(customer_id=customer_id, query=all_theme_ads_query)
+                        for row in response:
+                            ag_res = row.ad_group_ad.ad_group
+                            ad_res = row.ad_group_ad.resource_name
+                            ad_status = row.ad_group_ad.status.name
+                            label_name = row.label.name
 
-                                if ag_res not in original_ads_by_ag:
-                                    original_ads_by_ag[ag_res] = []
+                            # Skip the target theme ads (we'll enable those, not pause)
+                            if label_name == theme_label_name:
+                                continue
 
-                                original_ads_by_ag[ag_res].append({
+                            # DEDUPLICATION: Use dict to store unique ads by resource_name
+                            # (ads with multiple theme labels appear multiple times in results)
+                            if ag_res not in other_theme_ads_by_ag:
+                                other_theme_ads_by_ag[ag_res] = {}
+
+                            # Only store if not already present (prevent duplicate operations)
+                            if ad_res not in other_theme_ads_by_ag[ag_res]:
+                                other_theme_ads_by_ag[ag_res][ad_res] = {
                                     'resource': ad_res,
-                                    'status': ad_status
-                                })
+                                    'status': ad_status,
+                                    'label': label_name
+                                }
 
-                        except Exception as e:
-                            logger.warning(f"[{customer_id}] Batch {batch_idx//BATCH_SIZE + 1}: Could not query THEMA_ORIGINAL ads: {e}")
+                    except Exception as e:
+                        logger.warning(f"[{customer_id}] Batch {batch_idx//BATCH_SIZE + 1}: Could not query theme ads: {e}")
 
-                    logger.info(f"[{customer_id}] Found {sum(len(ads) for ads in original_ads_by_ag.values())} THEMA_ORIGINAL ads in {len(original_ads_by_ag)} ad groups")
+                logger.info(f"[{customer_id}] Found {sum(len(ads) for ads in other_theme_ads_by_ag.values())} other theme ads to pause (excluding {theme_label_name})")
 
                 # Step 3: Process ad groups in batches (pause→enable immediately per batch)
                 # This minimizes time gap between pausing originals and enabling theme ads
@@ -2668,19 +2665,21 @@ class ThemaAdsService:
                     for ag_res, theme_ads in batch:
                         needs_changes = False
 
-                        # Pause all THEMA_ORIGINAL ads in this ad group FIRST
-                        if ag_res in original_ads_by_ag:
-                            for orig_ad in original_ads_by_ag[ag_res]:
-                                if orig_ad['status'] == 'ENABLED':
+                        # Pause ALL other theme ads in this ad group FIRST (including THEMA_ORIGINAL and other THEME_* labels)
+                        if ag_res in other_theme_ads_by_ag:
+                            # Iterate over dict values (deduplicated ad info)
+                            for other_ad in other_theme_ads_by_ag[ag_res].values():
+                                if other_ad['status'] == 'ENABLED':
                                     operation = client.get_type("AdGroupAdOperation")
                                     ad_group_ad = operation.update
-                                    ad_group_ad.resource_name = orig_ad['resource']
+                                    ad_group_ad.resource_name = other_ad['resource']
                                     ad_group_ad.status = client.enums.AdGroupAdStatusEnum.PAUSED
                                     operation.update_mask.paths.append('status')
                                     pause_operations.append(operation)
                                     needs_changes = True
 
-                        # Enable ALL paused theme ads in this ad group
+                        # Enable ONLY ONE theme ad (the first PAUSED one) in this ad group
+                        # CRITICAL FIX: Only enable one to avoid exceeding 3-ad RSA limit
                         for theme_ad in theme_ads:
                             if theme_ad['status'] == 'PAUSED':
                                 operation = client.get_type("AdGroupAdOperation")
@@ -2690,6 +2689,7 @@ class ThemaAdsService:
                                 operation.update_mask.paths.append('status')
                                 enable_operations.append(operation)
                                 needs_changes = True
+                                break  # CRITICAL: Only enable ONE theme ad per ad group
 
                         # Track this ad group if it needed changes
                         if needs_changes:
@@ -2704,7 +2704,7 @@ class ThemaAdsService:
                             )
                             total_paused += len(pause_operations)
                         except Exception as e:
-                            logger.error(f"[{customer_id}] Batch {batch_idx//batch_size + 1}: Failed to pause THEMA_ORIGINAL ads: {e}")
+                            logger.error(f"[{customer_id}] Batch {batch_idx//batch_size + 1}: Failed to pause other theme ads: {e}")
                             async with stats_lock:
                                 stats['errors'].append(f"{customer_id}: Batch {batch_idx//batch_size + 1}: Failed to pause - {e}")
 
@@ -2724,7 +2724,7 @@ class ThemaAdsService:
                 # Calculate ad groups that were already correct
                 ad_groups_already_correct = len(theme_ads_by_ag) - len(ad_groups_needing_activation)
 
-                logger.info(f"[{customer_id}] Paused {total_paused} THEMA_ORIGINAL ads, Enabled {total_enabled} theme ads")
+                logger.info(f"[{customer_id}] Paused {total_paused} other theme ads, Enabled {total_enabled} {theme_label_name} ads")
                 logger.info(f"[{customer_id}] Activated: {len(ad_groups_needing_activation)}, Already correct: {ad_groups_already_correct}")
                 async with stats_lock:
                     stats['original_ads_paused'] += total_paused
