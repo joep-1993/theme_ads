@@ -16,6 +16,46 @@ logger = logging.getLogger(__name__)
 THEMA_ADS_PATH = Path(__file__).parent.parent / "thema_ads_optimized"
 sys.path.insert(0, str(THEMA_ADS_PATH))
 
+import random
+import time
+
+
+async def mutate_with_retry(ad_group_ad_service, customer_id: str, operations: list,
+                            max_retries: int = 3, base_delay: float = 1.0) -> tuple:
+    """
+    Execute mutate_ad_group_ads with retry logic for concurrent modification errors.
+
+    Args:
+        ad_group_ad_service: Google Ads AdGroupAdService
+        customer_id: Customer ID
+        operations: List of operations to execute
+        max_retries: Maximum number of retries (default 3)
+        base_delay: Base delay in seconds for exponential backoff (default 1.0)
+
+    Returns:
+        Tuple of (success: bool, result_or_error)
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            result = ad_group_ad_service.mutate_ad_group_ads(
+                customer_id=customer_id,
+                operations=operations
+            )
+            return (True, result)
+        except Exception as e:
+            error_str = str(e)
+            # Check if it's a concurrent modification error
+            if 'CONCURRENT_MODIFICATION' in error_str:
+                if attempt < max_retries:
+                    # Exponential backoff with jitter
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(f"[{customer_id}] Concurrent modification, retry {attempt + 1}/{max_retries} after {delay:.1f}s")
+                    await asyncio.sleep(delay)
+                    continue
+            # Either not a concurrent modification error, or we've exhausted retries
+            return (False, e)
+    return (False, Exception("Max retries exceeded"))
+
 
 class ThemaAdsService:
     """Service for managing Thema Ads processing with state persistence."""
@@ -2512,6 +2552,7 @@ class ThemaAdsService:
                 theme_label_name = get_theme_label(required_theme)
 
                 # Step 0: Get the label ID for the theme label
+                # Handle case where multiple labels have the same name - pick the one with most ads
                 label_query = f"""
                     SELECT label.id, label.resource_name
                     FROM label
@@ -2521,9 +2562,27 @@ class ThemaAdsService:
                 theme_label_id = None
                 try:
                     response = ga_service.search(customer_id=customer_id, query=label_query)
-                    for row in response:
-                        theme_label_id = row.label.id
-                        break
+                    candidate_labels = [row.label.id for row in response]
+
+                    if len(candidate_labels) == 1:
+                        theme_label_id = candidate_labels[0]
+                    elif len(candidate_labels) > 1:
+                        # Multiple labels with same name - pick the one with most ads
+                        logger.warning(f"[{customer_id}] Found {len(candidate_labels)} labels named {theme_label_name}, picking best one")
+                        best_count = -1
+                        for label_id in candidate_labels:
+                            count_query = f"""
+                                SELECT ad_group_ad.ad.id
+                                FROM ad_group_ad_label
+                                WHERE label.id = {label_id}
+                                AND ad_group_ad.status != REMOVED
+                            """
+                            count_response = ga_service.search(customer_id=customer_id, query=count_query)
+                            count = sum(1 for _ in count_response)
+                            if count > best_count:
+                                best_count = count
+                                theme_label_id = label_id
+                        logger.info(f"[{customer_id}] Selected label ID {theme_label_id} with {best_count} ads")
                 except Exception as e:
                     logger.error(f"[{customer_id}] Failed to find label {theme_label_name}: {e}")
                     async with stats_lock:
@@ -2592,68 +2651,84 @@ class ThemaAdsService:
                         stats['customers_processed'] += 1
                     return
 
-                # Step 2: Query ALL theme ads (including other themes we need to pause) in those same ad groups
-                # CRITICAL FIX: Query ALL theme ads, not just THEMA_ORIGINAL
+                # OPTIMIZATION: Only query RSAs for ad groups where theme ad is PAUSED
+                # If theme ad is already ENABLED, we don't need to pause other RSAs
+                ad_groups_needing_rsa_query = set()
+                ad_groups_already_active = set()
+                for ag_res, theme_ads in theme_ads_by_ag.items():
+                    has_paused_theme_ad = any(ad['status'] == 'PAUSED' for ad in theme_ads)
+                    if has_paused_theme_ad:
+                        ad_groups_needing_rsa_query.add(ag_res)
+                    else:
+                        ad_groups_already_active.add(ag_res)
+
+                logger.info(f"[{customer_id}] {len(ad_groups_needing_rsa_query)} ad groups need activation, {len(ad_groups_already_active)} already have ENABLED theme ad")
+
+                # Step 2: Query ALL RSAs in those ad groups (not just theme-labeled ones)
+                # This ensures we pause ALL other RSAs before enabling the theme ad
                 # IMPORTANT: Batch the query to avoid FILTER_HAS_TOO_MANY_VALUES error
-                # DEDUPLICATION: Use dict to prevent duplicate ad resources (ads with multiple labels appear multiple times)
-                other_theme_ads_by_ag = {}  # ad_group_resource -> {ad_resource -> ad_info}
-                ad_groups_list = list(ad_groups_with_theme)
+                other_ads_by_ag = {}  # ad_group_resource -> {ad_resource -> ad_info}
+                ad_groups_list = list(ad_groups_needing_rsa_query)  # OPTIMIZED: only query ad groups that need activation
                 BATCH_SIZE = 1000  # Google Ads API limit for IN clause values
 
-                logger.info(f"[{customer_id}] Querying ALL theme ads (to pause) in {len(ad_groups_list)} ad groups (batched)...")
+                # Build a set of target theme ad resources to exclude from pausing
+                target_theme_ad_resources = set()
+                for ag_res, theme_ads in theme_ads_by_ag.items():
+                    for theme_ad in theme_ads:
+                        target_theme_ad_resources.add(theme_ad['resource'])
+
+                if ad_groups_list:
+                    logger.info(f"[{customer_id}] Querying ALL RSAs (to pause) in {len(ad_groups_list)} ad groups (batched)...")
+                else:
+                    logger.info(f"[{customer_id}] No ad groups need RSA query (all theme ads already ENABLED)")
 
                 for batch_idx in range(0, len(ad_groups_list), BATCH_SIZE):
                     batch = ad_groups_list[batch_idx:batch_idx + BATCH_SIZE]
                     ag_resources_str = "', '".join(batch)
 
-                    # Query ALL theme ads - CRITICAL FIX: Use FROM ad_group_ad_label for correct syntax
-                    all_theme_ads_query = f"""
+                    # Query ALL RSAs in these ad groups (not just theme-labeled ones)
+                    all_rsas_query = f"""
                         SELECT
                             ad_group_ad.ad_group,
                             ad_group_ad.resource_name,
-                            ad_group_ad.status,
-                            label.name
-                        FROM ad_group_ad_label
+                            ad_group_ad.status
+                        FROM ad_group_ad
                         WHERE ad_group_ad.ad_group IN ('{ag_resources_str}')
                         AND ad_group_ad.ad.type = RESPONSIVE_SEARCH_AD
                         AND ad_group_ad.status != REMOVED
-                        AND label.name IN ('THEME_BF', 'THEME_SK', 'THEME_KERSTMIS', 'THEME_CM', 'THEME_SD', 'THEME_VALENTIJN', 'THEME_PASEN', 'THEME_MOEDERDAG', 'THEME_VADERDAG', 'THEME_ZOMER', 'THEME_TERUG_NAAR_SCHOOL', 'THEME_HALLOWEEN', 'THEMA_ORIGINAL')
                     """
 
                     try:
-                        response = ga_service.search(customer_id=customer_id, query=all_theme_ads_query)
+                        response = ga_service.search(customer_id=customer_id, query=all_rsas_query)
                         for row in response:
                             ag_res = row.ad_group_ad.ad_group
                             ad_res = row.ad_group_ad.resource_name
                             ad_status = row.ad_group_ad.status.name
-                            label_name = row.label.name
 
                             # Skip the target theme ads (we'll enable those, not pause)
-                            if label_name == theme_label_name:
+                            if ad_res in target_theme_ad_resources:
                                 continue
 
-                            # DEDUPLICATION: Use dict to store unique ads by resource_name
-                            # (ads with multiple theme labels appear multiple times in results)
-                            if ag_res not in other_theme_ads_by_ag:
-                                other_theme_ads_by_ag[ag_res] = {}
+                            # Store unique ads by resource_name
+                            if ag_res not in other_ads_by_ag:
+                                other_ads_by_ag[ag_res] = {}
 
                             # Only store if not already present (prevent duplicate operations)
-                            if ad_res not in other_theme_ads_by_ag[ag_res]:
-                                other_theme_ads_by_ag[ag_res][ad_res] = {
+                            if ad_res not in other_ads_by_ag[ag_res]:
+                                other_ads_by_ag[ag_res][ad_res] = {
                                     'resource': ad_res,
-                                    'status': ad_status,
-                                    'label': label_name
+                                    'status': ad_status
                                 }
 
                     except Exception as e:
-                        logger.warning(f"[{customer_id}] Batch {batch_idx//BATCH_SIZE + 1}: Could not query theme ads: {e}")
+                        logger.warning(f"[{customer_id}] Batch {batch_idx//BATCH_SIZE + 1}: Could not query RSAs: {e}")
 
-                logger.info(f"[{customer_id}] Found {sum(len(ads) for ads in other_theme_ads_by_ag.values())} other theme ads to pause (excluding {theme_label_name})")
+                logger.info(f"[{customer_id}] Found {sum(len(ads) for ads in other_ads_by_ag.values())} other RSAs to pause (excluding target theme ads)")
 
                 # Step 3: Process ad groups in batches (pause→enable immediately per batch)
                 # This minimizes time gap between pausing originals and enabling theme ads
                 ad_groups_list = list(theme_ads_by_ag.items())
-                batch_size = 100  # Process 100 ad groups at a time
+                batch_size = 200  # OPTIMIZED: Process 200 ad groups at a time (was 100, max 2000 is too risky)
 
                 total_paused = 0
                 total_enabled = 0
@@ -2669,10 +2744,10 @@ class ThemaAdsService:
                     for ag_res, theme_ads in batch:
                         needs_changes = False
 
-                        # Pause ALL other theme ads in this ad group FIRST (including THEMA_ORIGINAL and other THEME_* labels)
-                        if ag_res in other_theme_ads_by_ag:
+                        # Pause ALL other RSAs in this ad group FIRST (including unlabeled ads)
+                        if ag_res in other_ads_by_ag:
                             # Iterate over dict values (deduplicated ad info)
-                            for other_ad in other_theme_ads_by_ag[ag_res].values():
+                            for other_ad in other_ads_by_ag[ag_res].values():
                                 if other_ad['status'] == 'ENABLED':
                                     operation = client.get_type("AdGroupAdOperation")
                                     ad_group_ad = operation.update
@@ -2699,37 +2774,39 @@ class ThemaAdsService:
                         if needs_changes:
                             ad_groups_needing_activation.add(ag_res)
 
-                    # Step 4: Execute pause operations for this batch
+                    # Step 4: Execute pause operations for this batch (with retry)
                     if pause_operations:
-                        try:
-                            ad_group_ad_service.mutate_ad_group_ads(
-                                customer_id=customer_id,
-                                operations=pause_operations
-                            )
+                        success, result = await mutate_with_retry(
+                            ad_group_ad_service, customer_id, pause_operations,
+                            max_retries=3, base_delay=1.0
+                        )
+                        if success:
                             total_paused += len(pause_operations)
-                        except Exception as e:
-                            logger.error(f"[{customer_id}] Batch {batch_idx//batch_size + 1}: Failed to pause other theme ads: {e}")
+                        else:
+                            logger.error(f"[{customer_id}] Batch {batch_idx//batch_size + 1}: Failed to pause other RSAs after retries: {result}")
                             async with stats_lock:
-                                stats['errors'].append(f"{customer_id}: Batch {batch_idx//batch_size + 1}: Failed to pause - {e}")
+                                stats['errors'].append(f"{customer_id}: Batch {batch_idx//batch_size + 1}: Failed to pause - {result}")
 
-                    # Step 5: Immediately enable theme ads for this batch (minimize gap)
+                    # Step 5: Immediately enable theme ads for this batch (with retry)
                     if enable_operations:
-                        try:
-                            ad_group_ad_service.mutate_ad_group_ads(
-                                customer_id=customer_id,
-                                operations=enable_operations
-                            )
+                        success, result = await mutate_with_retry(
+                            ad_group_ad_service, customer_id, enable_operations,
+                            max_retries=3, base_delay=1.0
+                        )
+                        if success:
                             total_enabled += len(enable_operations)
-                        except Exception as e:
-                            logger.error(f"[{customer_id}] Batch {batch_idx//batch_size + 1}: Failed to enable theme ads: {e}")
+                        else:
+                            logger.error(f"[{customer_id}] Batch {batch_idx//batch_size + 1}: Failed to enable theme ads after retries: {result}")
                             async with stats_lock:
-                                stats['errors'].append(f"{customer_id}: Batch {batch_idx//batch_size + 1}: Failed to enable - {e}")
+                                stats['errors'].append(f"{customer_id}: Batch {batch_idx//batch_size + 1}: Failed to enable - {result}")
 
-                # Calculate ad groups that were already correct
-                ad_groups_already_correct = len(theme_ads_by_ag) - len(ad_groups_needing_activation)
+                # Calculate ad groups that were already correct (includes those with theme ad already ENABLED)
+                # ad_groups_already_active = skipped RSA query (theme ad already ENABLED)
+                # ad_groups in theme_ads_by_ag but not in ad_groups_needing_activation = no changes needed
+                ad_groups_already_correct = len(ad_groups_already_active) + (len(theme_ads_by_ag) - len(ad_groups_already_active) - len(ad_groups_needing_activation))
 
-                logger.info(f"[{customer_id}] Paused {total_paused} other theme ads, Enabled {total_enabled} {theme_label_name} ads")
-                logger.info(f"[{customer_id}] Activated: {len(ad_groups_needing_activation)}, Already correct: {ad_groups_already_correct}")
+                logger.info(f"[{customer_id}] Paused {total_paused} other RSAs, Enabled {total_enabled} {theme_label_name} ads")
+                logger.info(f"[{customer_id}] Activated: {len(ad_groups_needing_activation)}, Already correct: {ad_groups_already_correct} (incl {len(ad_groups_already_active)} pre-active)")
                 async with stats_lock:
                     stats['original_ads_paused'] += total_paused
                     stats['theme_ads_enabled'] += total_enabled

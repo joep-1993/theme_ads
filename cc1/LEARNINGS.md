@@ -3093,4 +3093,47 @@ theme_ads/
 ```
 
 ---
-_Last updated: 2025-11-25_
+_Last updated: 2025-12-02_
+
+## Duplicate Label Name Handling Fix (2025-12-02)
+
+**Problem**: V2 activation returned 0 ad groups for customer 5807833423 despite having 22,392 theme ads.
+
+**Root Cause**: Customer had 2 labels with the same name "THEME_SK":
+- Label ID 22076972979: 0 ads (empty)
+- Label ID 22088718413: 7,969 ads (the real one with themed ads)
+
+The original code used `break` after finding the first label, always selecting the empty one:
+```python
+# OLD (wrong): Picks first label found
+for row in response:
+    theme_label_id = row.label.id
+    break  # Always gets first (possibly empty) label
+```
+
+**Solution**: When multiple labels share the same name, count ads for each and pick the one with most:
+```python
+# NEW (correct): Pick label with most ads
+candidate_labels = [row.label.id for row in response]
+
+if len(candidate_labels) > 1:
+    best_count = -1
+    for label_id in candidate_labels:
+        count_query = f"""
+            SELECT ad_group_ad.ad.id
+            FROM ad_group_ad_label
+            WHERE label.id = {label_id}
+            AND ad_group_ad.status != REMOVED
+        """
+        count = sum(1 for _ in ga_service.search(customer_id, count_query))
+        if count > best_count:
+            best_count = count
+            theme_label_id = label_id
+```
+
+**Result**: Customer 5807833423 successfully activated with 7,929 ad groups.
+
+**Files Modified**:
+- `backend/thema_ads_service.py` - Updated `activate_ads_per_plan_v2()` label selection logic
+
+**Why duplicates exist**: Google Ads allows creating labels with identical names. This can happen when labels are created programmatically without checking for existing labels first.
